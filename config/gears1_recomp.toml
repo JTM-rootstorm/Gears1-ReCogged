@@ -1,0 +1,9 @@
+# Runtime cvars, copied next to the executable at build time.
+# Command-line flags override these.
+
+gpu_plugin = "xenos"
+
+# Upstream Xenia default (ReXGlue flips it to false). Without it, full-screen
+# unclipped draws claim the whole EDRAM on the fbo path, and the resulting
+# lossy render target ownership transfers tint the scene red.
+execute_unclipped_draw_vs_on_cpu = true

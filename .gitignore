@@ -1,0 +1,30 @@
+# Codegen output (huge, regenerated from the XEX)
+generated/
+
+# Build trees
+out/
+build/
+
+# Logs and manifest backups
+*.log
+*.toml~
+*.toml.bak*
+
+# Never commit game files or anything derived from them (shader dumps,
+# captures, memory images)
+*.xex
+*.xexp
+*.bin
+true/
+shader_dump/
+
+# Local backups, tool output and caches
+backup/
+tools/vk_strip_rte/out/
+__pycache__/
+
+# Ghidra project (contains decrypted game code once the XEX is imported)
+gears_recomp.gpr
+gears_recomp.rep/
+gears_recomp.lock
+gears_recomp.lock~
