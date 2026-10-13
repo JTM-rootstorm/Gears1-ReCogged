@@ -1295,3 +1295,13 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
     floatRepresentation dropped. Amended to c0edb2718, run A re-tested clean
     (log: depthBiasControl, leastRepresentableValueForceUnormRepresentation,
     depthBiasExact), force-pushed. User replies to the review personally.
+- CONVENTION CLEANUP (2026-10-12/13). SDK: fix/gears1-xenos-rendering
+  rewritten to 9 commits (diagnostic commits moved to local/gears1-debug,
+  old tip tagged backup/gears1-xenos-rendering-2026-10-12; A/B cvars removed;
+  depth bias + sample locations detected via VulkanDevice Properties/
+  Extensions/functions; kXenosSamplePositions2x in draw_util; gamma transfer
+  conversion gated on gamma_render_target_as_unorm16), force-pushed 7e3c319.
+  New integration branch gears1-main (bc18f9d) = main + the GPU topic +
+  fix/xam-profile-settings; the runtime is built from it. Gears1 is a git repo
+  (43de0b9 initial, dcf3798 cleanup). User-tested: input, mouse look, blood
+  pools, no spikes/tint/device lost.
