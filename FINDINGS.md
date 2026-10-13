@@ -1300,7 +1300,8 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   old tip tagged backup/gears1-xenos-rendering-2026-10-12; A/B cvars removed;
   depth bias + sample locations detected via VulkanDevice Properties/
   Extensions/functions; kXenosSamplePositions2x in draw_util; gamma transfer
-  conversion gated on gamma_render_target_as_unorm16), force-pushed 7e3c319.
+  conversion gated on gamma_render_target_as_unorm16), force-pushed; then the
+  duplicate xam commits were dropped from it (GPU-only, 78122c9, 7 commits).
   New integration branch gears1-main (bc18f9d) = main + the GPU topic +
   fix/xam-profile-settings; the runtime is built from it. Gears1 is a git repo
   (43de0b9 initial, dcf3798 cleanup). User-tested: input, mouse look, blood
