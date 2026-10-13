@@ -1,19 +1,9 @@
 // Native input (NATIVE_PORT.md seam 1, stage 1): the game's XAM input
-// imports implemented on SDL instead of ReXGlue's input system.
-//
-// The game reads pads only through XamInputGetState / GetCapabilities /
-// SetState (via the XDK wrappers 826127C0..D8). Their import thunks are
-// resolved to `__imp__XamInput*` symbols that librexruntime.so defines; a
-// definition in the executable takes precedence, so these replace them. The
-// runtime's versions stay reachable with dlsym(RTLD_NEXT) for the fallback
-// (gears1_native_input=false).
-//
-// SDL is the runtime's copy (librexruntime.so exports it and pumps its
-// events); linking a second SDL would have its own state and no window.
+// imports implemented on SDL instead of ReXGlue's input system. How the
+// import overrides and the shared SDL work: NATIVE_PORT.md "Status".
 //
 // User 0 gets the first SDL gamepad merged with the keyboard/mouse mapping
-// below; users 1-3 get the next gamepads. Mouse look (stage 2) will bypass
-// the controller path entirely.
+// below; users 1-3 get the next gamepads. Mouse look is src/mouse_look.cpp.
 
 #include <dlfcn.h>
 
@@ -21,14 +11,16 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <mutex>
 
 #include <SDL3/SDL.h>
 
 #include <rex/cvar.h>
+#include <rex/input/input.h>
 #include <rex/logging/macros.h>
 #include <rex/ppc.h>
+#include <rex/system/xmemory.h>
+#include <rex/system/xtypes.h>
 
 #include "probes.h"
 
@@ -39,32 +31,15 @@ REXCVAR_DEFINE_BOOL(gears1_native_input_keyboard, true, "Gears1",
                     "Map keyboard and mouse buttons onto player 1's pad (WASD left stick, arrows "
                     "right stick, mouse buttons triggers)");
 
+using rex::X_RESULT;  // used by the X_ERROR_* macros
+
 namespace {
 
-constexpr uint32_t kErrorSuccess = 0;
-constexpr uint32_t kErrorBadArguments = 0xA0;
-constexpr uint32_t kErrorDeviceNotConnected = 0x48F;
-constexpr uint32_t kFlagGamepad = 0x1;
+using namespace rex::input;
+using rex::memory::GuestPtr;
+
 constexpr uint32_t kFlagAnyUser = 0x40000000;
 constexpr uint32_t kUserCount = 4;
-
-// XINPUT_GAMEPAD wButtons.
-enum : uint16_t {
-  kDpadUp = 0x0001,
-  kDpadDown = 0x0002,
-  kDpadLeft = 0x0004,
-  kDpadRight = 0x0008,
-  kStart = 0x0010,
-  kBack = 0x0020,
-  kLeftThumb = 0x0040,
-  kRightThumb = 0x0080,
-  kLeftShoulder = 0x0100,
-  kRightShoulder = 0x0200,
-  kA = 0x1000,
-  kB = 0x2000,
-  kX = 0x4000,
-  kY = 0x8000,
-};
 
 struct Pad {
   uint16_t buttons = 0;
@@ -73,29 +48,14 @@ struct Pad {
   bool connected = false;
 };
 
-void Store16(uint8_t* p, uint16_t v) {
-  v = __builtin_bswap16(v);
-  std::memcpy(p, &v, 2);
-}
-void Store32(uint8_t* p, uint32_t v) {
-  v = __builtin_bswap32(v);
-  std::memcpy(p, &v, 4);
-}
-uint16_t Load16(const uint8_t* p) {
-  uint16_t v;
-  std::memcpy(&v, p, 2);
-  return __builtin_bswap16(v);
-}
-
-// XINPUT_GAMEPAD, 12 bytes, big-endian.
-void WriteGamepad(uint8_t* p, const Pad& pad) {
-  Store16(p, pad.buttons);
-  p[2] = pad.left_trigger;
-  p[3] = pad.right_trigger;
-  Store16(p + 4, uint16_t(pad.lx));
-  Store16(p + 6, uint16_t(pad.ly));
-  Store16(p + 8, uint16_t(pad.rx));
-  Store16(p + 10, uint16_t(pad.ry));
+void WriteGamepad(X_INPUT_GAMEPAD& out, const Pad& pad) {
+  out.buttons = pad.buttons;
+  out.left_trigger = pad.left_trigger;
+  out.right_trigger = pad.right_trigger;
+  out.thumb_lx = pad.lx;
+  out.thumb_ly = pad.ly;
+  out.thumb_rx = pad.rx;
+  out.thumb_ry = pad.ry;
 }
 
 int16_t InvertAxis(int16_t v) { return v == INT16_MIN ? INT16_MAX : int16_t(-v); }
@@ -105,9 +65,9 @@ int16_t PickStronger(int16_t a, int16_t b) { return std::abs(int(a)) >= std::abs
 std::mutex g_mutex;
 SDL_Gamepad* g_gamepads[kUserCount] = {};
 
-// Focus and mouse buttons from SDL events (delivered on the thread that pumps
-// events, the main thread): SDL_GetKeyboardFocus / SDL_GetMouseState must not
-// be called from guest threads.
+// Focus and mouse buttons from SDL events, delivered on the thread that pumps
+// them (the main thread): SDL's focus and mouse state getters must not be
+// called from guest threads.
 std::atomic<bool> g_focused{true};
 std::atomic<uint32_t> g_mouse_buttons{0};
 std::once_flag g_watch_once;
@@ -135,6 +95,12 @@ bool OnEvent(void*, SDL_Event* event) {
 
 void EnsureEventWatch() {
   std::call_once(g_watch_once, [] { SDL_AddEventWatch(OnEvent, nullptr); });
+}
+
+bool KeyDown(SDL_Scancode scancode) {
+  int key_count = 0;
+  const bool* keys = SDL_GetKeyboardState(&key_count);
+  return keys && int(scancode) < key_count && keys[scancode];
 }
 
 // Opens SDL gamepads in connection order, one per user.
@@ -171,20 +137,20 @@ void ReadGamepad(SDL_Gamepad* gamepad, Pad& pad) {
     SDL_GamepadButton button;
     uint16_t bit;
   } constexpr kMap[] = {
-      {SDL_GAMEPAD_BUTTON_DPAD_UP, kDpadUp},
-      {SDL_GAMEPAD_BUTTON_DPAD_DOWN, kDpadDown},
-      {SDL_GAMEPAD_BUTTON_DPAD_LEFT, kDpadLeft},
-      {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, kDpadRight},
-      {SDL_GAMEPAD_BUTTON_START, kStart},
-      {SDL_GAMEPAD_BUTTON_BACK, kBack},
-      {SDL_GAMEPAD_BUTTON_LEFT_STICK, kLeftThumb},
-      {SDL_GAMEPAD_BUTTON_RIGHT_STICK, kRightThumb},
-      {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, kLeftShoulder},
-      {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, kRightShoulder},
-      {SDL_GAMEPAD_BUTTON_SOUTH, kA},
-      {SDL_GAMEPAD_BUTTON_EAST, kB},
-      {SDL_GAMEPAD_BUTTON_WEST, kX},
-      {SDL_GAMEPAD_BUTTON_NORTH, kY},
+      {SDL_GAMEPAD_BUTTON_DPAD_UP, X_INPUT_GAMEPAD_DPAD_UP},
+      {SDL_GAMEPAD_BUTTON_DPAD_DOWN, X_INPUT_GAMEPAD_DPAD_DOWN},
+      {SDL_GAMEPAD_BUTTON_DPAD_LEFT, X_INPUT_GAMEPAD_DPAD_LEFT},
+      {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, X_INPUT_GAMEPAD_DPAD_RIGHT},
+      {SDL_GAMEPAD_BUTTON_START, X_INPUT_GAMEPAD_START},
+      {SDL_GAMEPAD_BUTTON_BACK, X_INPUT_GAMEPAD_BACK},
+      {SDL_GAMEPAD_BUTTON_LEFT_STICK, X_INPUT_GAMEPAD_LEFT_THUMB},
+      {SDL_GAMEPAD_BUTTON_RIGHT_STICK, X_INPUT_GAMEPAD_RIGHT_THUMB},
+      {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, X_INPUT_GAMEPAD_LEFT_SHOULDER},
+      {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, X_INPUT_GAMEPAD_RIGHT_SHOULDER},
+      {SDL_GAMEPAD_BUTTON_SOUTH, X_INPUT_GAMEPAD_A},
+      {SDL_GAMEPAD_BUTTON_EAST, X_INPUT_GAMEPAD_B},
+      {SDL_GAMEPAD_BUTTON_WEST, X_INPUT_GAMEPAD_X},
+      {SDL_GAMEPAD_BUTTON_NORTH, X_INPUT_GAMEPAD_Y},
   };
   for (const auto& m : kMap) {
     if (SDL_GetGamepadButton(gamepad, m.button)) pad.buttons |= m.bit;
@@ -205,40 +171,40 @@ void ReadKeyboard(Pad& pad) {
   // game pauses for a disconnected controller.
   pad.connected = true;
   if (!g_focused.load(std::memory_order_relaxed)) return;
-  int key_count = 0;
-  const bool* keys = SDL_GetKeyboardState(&key_count);
-  if (!keys) return;
-  auto down = [&](SDL_Scancode s) { return int(s) < key_count && keys[s]; };
   struct {
     SDL_Scancode key;
     uint16_t bit;
   } constexpr kMap[] = {
-      {SDL_SCANCODE_SPACE, kA},       {SDL_SCANCODE_F, kB},          {SDL_SCANCODE_E, kX},
-      {SDL_SCANCODE_Q, kY},           {SDL_SCANCODE_R, kRightShoulder},
-      {SDL_SCANCODE_TAB, kLeftShoulder}, {SDL_SCANCODE_C, kLeftThumb},
-      {SDL_SCANCODE_1, kDpadUp},      {SDL_SCANCODE_2, kDpadRight},  {SDL_SCANCODE_3, kDpadDown},
-      {SDL_SCANCODE_4, kDpadLeft},    {SDL_SCANCODE_ESCAPE, kStart}, {SDL_SCANCODE_RETURN, kStart},
-      {SDL_SCANCODE_BACKSPACE, kBack},
+      {SDL_SCANCODE_SPACE, X_INPUT_GAMEPAD_A},
+      {SDL_SCANCODE_F, X_INPUT_GAMEPAD_B},
+      {SDL_SCANCODE_E, X_INPUT_GAMEPAD_X},
+      {SDL_SCANCODE_Q, X_INPUT_GAMEPAD_Y},
+      {SDL_SCANCODE_R, X_INPUT_GAMEPAD_RIGHT_SHOULDER},
+      {SDL_SCANCODE_TAB, X_INPUT_GAMEPAD_LEFT_SHOULDER},
+      {SDL_SCANCODE_C, X_INPUT_GAMEPAD_LEFT_THUMB},
+      {SDL_SCANCODE_1, X_INPUT_GAMEPAD_DPAD_UP},
+      {SDL_SCANCODE_2, X_INPUT_GAMEPAD_DPAD_RIGHT},
+      {SDL_SCANCODE_3, X_INPUT_GAMEPAD_DPAD_DOWN},
+      {SDL_SCANCODE_4, X_INPUT_GAMEPAD_DPAD_LEFT},
+      {SDL_SCANCODE_ESCAPE, X_INPUT_GAMEPAD_START},
+      {SDL_SCANCODE_RETURN, X_INPUT_GAMEPAD_START},
+      {SDL_SCANCODE_BACKSPACE, X_INPUT_GAMEPAD_BACK},
   };
   for (const auto& m : kMap) {
-    if (down(m.key)) pad.buttons |= m.bit;
+    if (KeyDown(m.key)) pad.buttons |= m.bit;
   }
-  auto axis = [&](SDL_Scancode negative, SDL_Scancode positive) {
-    return int16_t((down(positive) ? 32767 : 0) - (down(negative) ? 32767 : 0));
+  auto axis = [](SDL_Scancode negative, SDL_Scancode positive) {
+    return int16_t((KeyDown(positive) ? 32767 : 0) - (KeyDown(negative) ? 32767 : 0));
   };
-  const int16_t lx = axis(SDL_SCANCODE_A, SDL_SCANCODE_D);
-  const int16_t ly = axis(SDL_SCANCODE_S, SDL_SCANCODE_W);
-  const int16_t rx = axis(SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT);
-  const int16_t ry = axis(SDL_SCANCODE_DOWN, SDL_SCANCODE_UP);
-  pad.lx = PickStronger(pad.lx, lx);
-  pad.ly = PickStronger(pad.ly, ly);
-  pad.rx = PickStronger(pad.rx, rx);
-  pad.ry = PickStronger(pad.ry, ry);
+  pad.lx = PickStronger(pad.lx, axis(SDL_SCANCODE_A, SDL_SCANCODE_D));
+  pad.ly = PickStronger(pad.ly, axis(SDL_SCANCODE_S, SDL_SCANCODE_W));
+  pad.rx = PickStronger(pad.rx, axis(SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT));
+  pad.ry = PickStronger(pad.ry, axis(SDL_SCANCODE_DOWN, SDL_SCANCODE_UP));
 
   const uint32_t mouse = g_mouse_buttons.load(std::memory_order_relaxed);
-  if (mouse & SDL_BUTTON_RMASK) pad.left_trigger = 255;      // aim
-  if (mouse & SDL_BUTTON_LMASK) pad.right_trigger = 255;     // fire
-  if (mouse & SDL_BUTTON_MMASK) pad.buttons |= kRightThumb;  // zoom
+  if (mouse & SDL_BUTTON_RMASK) pad.left_trigger = 255;                      // aim
+  if (mouse & SDL_BUTTON_LMASK) pad.right_trigger = 255;                     // fire
+  if (mouse & SDL_BUTTON_MMASK) pad.buttons |= X_INPUT_GAMEPAD_RIGHT_THUMB;  // zoom
 }
 
 // Returns false when the user has no device.
@@ -258,9 +224,8 @@ bool ReadPad(uint32_t user, Pad& pad) {
   return pad.connected;
 }
 
-using RuntimeImport = void (*)(PPCContext&, uint8_t*);
-RuntimeImport Original(const char* name) {
-  auto function = reinterpret_cast<RuntimeImport>(dlsym(RTLD_NEXT, name));
+PPCFunc* Original(const char* name) {
+  auto* function = reinterpret_cast<PPCFunc*>(dlsym(RTLD_NEXT, name));
   if (!function) REXLOG_ERROR("Native input: no runtime {} to fall back to", name);
   return function;
 }
@@ -269,34 +234,34 @@ uint32_t UserIndex(uint32_t user_index, uint32_t flags) {
   return ((user_index & 0xFF) == 0xFF || (flags & kFlagAnyUser)) ? 0 : user_index;
 }
 
+// Requests for another device type or a user we don't serve.
+bool NoDevice(uint32_t user, uint32_t flags) {
+  return ((flags & 0xFF) && !(flags & X_INPUT_FLAG_GAMEPAD)) || user >= kUserCount;
+}
+
 uint32_t g_packet[kUserCount] = {};
 Pad g_last[kUserCount];
 
 }  // namespace
 
-bool Gears1WindowFocused() {
+bool Gears1KeyDown(int scancode) {
   EnsureEventWatch();
-  return g_focused.load(std::memory_order_relaxed);
+  return g_focused.load(std::memory_order_relaxed) && KeyDown(SDL_Scancode(scancode));
 }
-uint32_t Gears1MouseButtons() { return g_mouse_buttons.load(std::memory_order_relaxed); }
 
 // XamInputGetState(user_index, flags, XINPUT_STATE* state)
 extern "C" REX_FUNC(__imp__XamInputGetState) {
   if (!REXCVAR_GET(gears1_native_input)) {
-    static const RuntimeImport original = Original("__imp__XamInputGetState");
+    static PPCFunc* const original = Original("__imp__XamInputGetState");
     if (original) original(ctx, base);
     return;
   }
   const uint32_t flags = ctx.r4.u32;
   const uint32_t state = ctx.r5.u32;
   const uint32_t user = UserIndex(ctx.r3.u32, flags);
-  if (((flags & 0xFF) && !(flags & kFlagGamepad)) || user >= kUserCount) {
-    ctx.r3.u64 = kErrorDeviceNotConnected;
-    return;
-  }
   Pad pad;
-  if (!ReadPad(user, pad)) {
-    ctx.r3.u64 = kErrorDeviceNotConnected;
+  if (NoDevice(user, flags) || !ReadPad(user, pad)) {
+    ctx.r3.u64 = X_ERROR_DEVICE_NOT_CONNECTED;
     return;
   }
   // Games call this with a null state as a connection query.
@@ -308,16 +273,17 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
       ++g_packet[user];
       g_last[user] = pad;
     }
-    Store32(base + state, g_packet[user]);
-    WriteGamepad(base + state + 4, pad);
+    auto* out = GuestPtr<X_INPUT_STATE*>(base, state);
+    out->packet_number = g_packet[user];
+    WriteGamepad(out->gamepad, pad);
   }
-  ctx.r3.u64 = kErrorSuccess;
+  ctx.r3.u64 = X_ERROR_SUCCESS;
 }
 
 // XamInputGetCapabilities(user_index, flags, XINPUT_CAPABILITIES* caps)
 extern "C" REX_FUNC(__imp__XamInputGetCapabilities) {
   if (!REXCVAR_GET(gears1_native_input)) {
-    static const RuntimeImport original = Original("__imp__XamInputGetCapabilities");
+    static PPCFunc* const original = Original("__imp__XamInputGetCapabilities");
     if (original) original(ctx, base);
     return;
   }
@@ -325,50 +291,51 @@ extern "C" REX_FUNC(__imp__XamInputGetCapabilities) {
   const uint32_t caps = ctx.r5.u32;
   const uint32_t user = UserIndex(ctx.r3.u32, flags);
   if (!caps) {
-    ctx.r3.u64 = kErrorBadArguments;
+    ctx.r3.u64 = X_ERROR_BAD_ARGUMENTS;
     return;
   }
   Pad pad;
-  if (((flags & 0xFF) && !(flags & kFlagGamepad)) || user >= kUserCount || !ReadPad(user, pad)) {
-    ctx.r3.u64 = kErrorDeviceNotConnected;
+  if (NoDevice(user, flags) || !ReadPad(user, pad)) {
+    ctx.r3.u64 = X_ERROR_DEVICE_NOT_CONNECTED;
     return;
   }
-  uint8_t* p = base + caps;
-  std::memset(p, 0, 20);
-  p[0] = 1;  // XINPUT_DEVTYPE_GAMEPAD
-  p[1] = 1;  // XINPUT_DEVSUBTYPE_GAMEPAD
-  Pad full;  // all buttons and full axis ranges supported
+  auto* out = GuestPtr<X_INPUT_CAPABILITIES*>(base, caps);
+  *out = {};
+  out->type = XINPUT_DEVTYPE_GAMEPAD;
+  out->sub_type = 1;  // XINPUT_DEVSUBTYPE_GAMEPAD
+  Pad full;           // all buttons and full axis ranges supported
   full.buttons = 0xF3FF;
   full.left_trigger = full.right_trigger = 0xFF;
   full.lx = full.ly = full.rx = full.ry = int16_t(0xFFC0);
-  WriteGamepad(p + 4, full);
-  Store16(p + 16, 0xFFFF);  // vibration motors
-  Store16(p + 18, 0xFFFF);
-  ctx.r3.u64 = kErrorSuccess;
+  WriteGamepad(out->gamepad, full);
+  out->vibration.left_motor_speed = 0xFFFF;
+  out->vibration.right_motor_speed = 0xFFFF;
+  ctx.r3.u64 = X_ERROR_SUCCESS;
 }
 
 // XamInputSetState(user_index, unknown, XINPUT_VIBRATION* vibration)
 extern "C" REX_FUNC(__imp__XamInputSetState) {
   if (!REXCVAR_GET(gears1_native_input)) {
-    static const RuntimeImport original = Original("__imp__XamInputSetState");
+    static PPCFunc* const original = Original("__imp__XamInputSetState");
     if (original) original(ctx, base);
     return;
   }
   const uint32_t vibration = ctx.r5.u32;
   if (!vibration) {
-    ctx.r3.u64 = kErrorBadArguments;
+    ctx.r3.u64 = X_ERROR_BAD_ARGUMENTS;
     return;
   }
-  const uint32_t user = (ctx.r3.u32 & 0xFF) == 0xFF ? 0 : ctx.r3.u32;
+  const uint32_t user = UserIndex(ctx.r3.u32, 0);
   std::lock_guard<std::mutex> lock(g_mutex);
   SDL_Gamepad* gamepad = user < kUserCount ? g_gamepads[user] : nullptr;
   if (!gamepad) {
     // Keyboard-only player 1 accepts (and ignores) vibration.
-    ctx.r3.u64 = user == 0 ? kErrorSuccess : kErrorDeviceNotConnected;
+    ctx.r3.u64 = user == 0 ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
     return;
   }
   // Left motor is low frequency, right is high frequency; held until the
   // next call (the game stops it explicitly).
-  SDL_RumbleGamepad(gamepad, Load16(base + vibration), Load16(base + vibration + 2), 0xFFFFFFFF);
-  ctx.r3.u64 = kErrorSuccess;
+  const auto* in = GuestPtr<const X_INPUT_VIBRATION*>(base, vibration);
+  SDL_RumbleGamepad(gamepad, in->left_motor_speed, in->right_motor_speed, 0xFFFFFFFF);
+  ctx.r3.u64 = X_ERROR_SUCCESS;
 }

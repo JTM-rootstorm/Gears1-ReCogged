@@ -1,7 +1,7 @@
 """Probe hook table for tools/gen_hooks.py (PROBES.md).
 
 Each entry: (address, name, kind, extra). Names match the Ghidra project and
-are what gears1_probe_skip and the trace use. Kinds (src/probes.h):
+are what gears1_probe_skip and the trace use. Kinds (Gears1ProbeKind):
   pass   scene renderer pass / sub-pass: traced ENTER/LEAVE, skippable
   scope  tracked but not traced (DrawMesh etc.), skippable
   policy drawing-policy DrawShared: tags the following draws, skippable
@@ -9,7 +9,7 @@ are what gears1_probe_skip and the trace use. Kinds (src/probes.h):
   draw   D3D draw: traced with a state snapshot
   event  other call traced with its raw arguments
   frame  frame boundary (after the original returns)
-  count  only counted by gears1_d3d_observe (with optional pre hooks)
+  hook   no probe, only the pre/post hooks in extra
 extra keys:
   pre    list of C++ functions `void f(PPCContext&, uint8_t*)` called before
          the original (and before the probe)
@@ -89,12 +89,10 @@ PROBES = [
     (0x82229460, 'SetDepthBias', 'event', {'pre': ['Gears1ProbeDepthBiasPre']}),
     (0x82229398, 'SetSlopeScaleDepthBias', 'event', {'pre': ['Gears1ProbeDepthBiasPre']}),
 
-    # Native mouse look (src/mouse_look.cpp): APlayerController::Tick
-    # (this r3, DeltaSeconds f1, TickType r5) runs the PlayerTick script event
-    # (UpdateRotation); mouse deltas are added to Rotation after it.
-    (0x823CB580, 'PlayerControllerTick', 'count', {'post': ['Gears1MouseLookAfterTick']}),
+    # APlayerController::Tick: native mouse look (src/mouse_look.cpp)
+    (0x823CB580, 'PlayerControllerTick', 'hook', {'post': ['Gears1MouseLookAfterTick']}),
 
     # Shader binds (shader dump + hash cache)
-    (0x82222B98, 'SetVertexShader', 'count', {'pre': ['Gears1OnSetVertexShader']}),
-    (0x82222808, 'SetPixelShader', 'count', {'pre': ['Gears1OnSetPixelShader']}),
+    (0x82222B98, 'SetVertexShader', 'hook', {'pre': ['Gears1OnSetVertexShader']}),
+    (0x82222808, 'SetPixelShader', 'hook', {'pre': ['Gears1OnSetPixelShader']}),
 ]

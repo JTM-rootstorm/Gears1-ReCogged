@@ -4,31 +4,28 @@
 
 #include "gears1_recomp_app.h"
 
-#include <algorithm>
-
 #include <rex/cvar.h>
 #include <rex/logging/macros.h>
 #include <rex/runtime.h>
 #include <rex/system/xmemory.h>
 
-// UE3 renders the 2x MSAA scene in screen tiles (predicated tiling), which
-// breaks dynamic lighting under emulation (black wedges/spikes converging on
-// the screen centre, black polygons on characters). Selecting the single
-// full-screen tile preset (GTilingMode = 4) avoids it while keeping the
-// game's tiling code path on. Canary's "Black Shading Fix" patch (author boma)
-// also turns that code off (GUseTilingCode = FALSE), but then growing decals
-// such as blood pools are drawn with a misplaced, flickering piece.
+// UE3 renders the 2x MSAA scene in predicated screen tiles, which show black
+// polygons on characters under emulation. GTilingMode = 4 selects its single
+// full-screen tile preset with the tiling code left on (Canary's "Black
+// Shading Fix" patch also sets GUseTilingCode = FALSE). Presets and globals:
+// FINDINGS.md "UE3 TILING GLOBALS".
 REXCVAR_DEFINE_BOOL(gears1_black_shading_fix, true, "Gears1",
                     "Render the UE3 scene as one full-screen tile (GTilingMode = 4) instead "
-                    "of 2x MSAA predicated tiles");
-// GTilingMode indexes UE3's render target presets (tile counts at 0x82BB6B90,
-// tile rects at 0x82083728): 0 = 3 tiles, 1 = 2 tiles (game default), 2 = 2
-// tiles, 3 = 3 tiles, 4 = 1 full-screen tile without the 2x MSAA half-pixel
-// shift. Overrides for experiments; -1 keeps what the fix (or the game) uses.
+                    "of 2x MSAA predicated tiles")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_INT32(gears1_use_tiling_code, -1, "Gears1",
-                     "Override UE3 GUseTilingCode (0 or 1, -1 = default)");
+                     "Override UE3 GUseTilingCode (0 or 1, -1 = default)")
+    .range(-1, 1)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_INT32(gears1_tiling_mode, -1, "Gears1",
-                     "Override UE3 GTilingMode render target preset (0-4, -1 = default)");
+                     "Override UE3 GTilingMode render target preset (0-4, -1 = default)")
+    .range(-1, 4)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace {
 
@@ -55,10 +52,10 @@ void Gears1RecompApp::OnPostLoadXexImage() {
     mode = 4;
   }
   if (REXCVAR_GET(gears1_use_tiling_code) >= 0) {
-    use = REXCVAR_GET(gears1_use_tiling_code) ? 1 : 0;
+    use = REXCVAR_GET(gears1_use_tiling_code);
   }
   if (REXCVAR_GET(gears1_tiling_mode) >= 0) {
-    mode = std::min(REXCVAR_GET(gears1_tiling_mode), 4);
+    mode = REXCVAR_GET(gears1_tiling_mode);
   }
   *use_tiling_code = uint8_t(use);
   *tiling_mode = uint8_t(mode);

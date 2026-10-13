@@ -2,21 +2,17 @@
 //
 // UE3 builds its shader objects without calling D3D's Create*Shader (the
 // pixel-shader init is fully inlined), so shaders are captured when they are
-// bound: the observer's SetVertexShader / SetPixelShader overrides
-// (tools/gen_d3d_observe.py, PRE_HOOKS) call the functions below.
+// bound: pre hooks on SetVertexShader / SetPixelShader (tools/hook_table.py)
+// call the functions below with r3 = device, r4 = shader object.
 //
 // Each file is the original Xbox shader container: the header (virtual part,
 // copied into the shader object) followed by the microcode (physical part).
 // The vertex-shader microcode is patched in place when D3D binds it to a
 // vertex declaration, so one shader can produce several files; they are
 // deduplicated by content.
-//
-// The same per-object hash is kept for probe traces (src/probes.cpp) while a
-// trace is running, even when the dump itself is off.
 
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <string>
@@ -26,8 +22,8 @@
 #include <rex/cvar.h>
 #include <rex/hash.h>
 #include <rex/logging/macros.h>
+#include <rex/memory/utils.h>
 #include <rex/ppc.h>
-#include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 
 #include "probes.h"
@@ -57,12 +53,6 @@ constexpr uint32_t kMagic = 0x102A1100;
 constexpr uint32_t kMaxHeaderSize = 0x10000;
 constexpr uint32_t kMaxMicrocodeSize = 0x40000;
 
-uint32_t LoadBE32(const uint8_t* p) {
-  uint32_t v;
-  std::memcpy(&v, p, sizeof(v));
-  return __builtin_bswap32(v);
-}
-
 std::mutex g_mutex;
 struct ObjectState {
   uint64_t hash = 0;
@@ -74,18 +64,19 @@ FILE* g_index = nullptr;
 bool g_failed = false;
 uint32_t g_warnings = 0;
 
-void OnSetShader(const ShaderKind& kind, uint32_t object) {
+void OnSetShader(const ShaderKind& kind, uint8_t* base, uint32_t object) {
   const bool dump = REXCVAR_GET(gears1_shader_dump);
   if (!object || !(dump || Gears1ProbeWantsShaderHashes())) {
     return;
   }
-  auto* memory = rex::system::kernel_memory();
-  const uint8_t* header = memory->TranslateVirtual<const uint8_t*>(object + kind.header_offset);
-  const uint32_t flags = LoadBE32(header);
-  const uint32_t header_size = LoadBE32(header + 4);
-  const uint32_t microcode_size = LoadBE32(header + 8);
+  using rex::memory::GuestPtr;
+  using rex::memory::load_and_swap;
+  const uint8_t* header = GuestPtr(base, object + kind.header_offset);
+  const uint32_t flags = load_and_swap<uint32_t>(header);
+  const uint32_t header_size = load_and_swap<uint32_t>(header + 4);
+  const uint32_t microcode_size = load_and_swap<uint32_t>(header + 8);
   const uint32_t microcode_address =
-      LoadBE32(memory->TranslateVirtual<const uint8_t*>(object + kind.microcode_pointer_offset));
+      load_and_swap<uint32_t>(GuestPtr(base, object + kind.microcode_pointer_offset));
 
   std::lock_guard<std::mutex> lock(g_mutex);
   // Hashing on every bind is too slow (thousands per frame). Re-check an
@@ -106,7 +97,7 @@ void OnSetShader(const ShaderKind& kind, uint32_t object) {
     }
     return;
   }
-  const uint8_t* microcode = memory->TranslateVirtual<const uint8_t*>(microcode_address);
+  const uint8_t* microcode = GuestPtr(base, microcode_address);
   XXH3_state_t state;
   XXH3_64bits_reset(&state);
   XXH3_64bits_update(&state, header, header_size);
@@ -146,10 +137,12 @@ void OnSetShader(const ShaderKind& kind, uint32_t object) {
 
 }  // namespace
 
-// Called by the overrides (src/hooks_gen.cpp, tools/hook_table.py) before the
-// original function; r3 = device, r4 = shader object.
-void Gears1OnSetVertexShader(PPCContext& ctx, uint8_t*) { OnSetShader(kVertexShader, ctx.r4.u32); }
-void Gears1OnSetPixelShader(PPCContext& ctx, uint8_t*) { OnSetShader(kPixelShader, ctx.r4.u32); }
+void Gears1OnSetVertexShader(PPCContext& ctx, uint8_t* base) {
+  OnSetShader(kVertexShader, base, ctx.r4.u32);
+}
+void Gears1OnSetPixelShader(PPCContext& ctx, uint8_t* base) {
+  OnSetShader(kPixelShader, base, ctx.r4.u32);
+}
 
 uint64_t Gears1ShaderHash(uint32_t object) {
   if (!object) {

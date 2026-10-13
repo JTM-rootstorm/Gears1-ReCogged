@@ -1,14 +1,8 @@
-// Probe hooks on the UE3 renderer (PROBES.md).
+// Probe hooks on the UE3 renderer; cvars and trace format: PROBES.md "Usage".
 //
 // The generated overrides (src/hooks_gen.cpp) call in here. While active,
 // each thread keeps a stack of the UE3 passes/scopes it is in and the last
 // drawing policy (DrawShared) it ran, so every D3D draw can be attributed.
-//   gears1_probe            per-frame draws-per-pass summary
-//   trigger file            full trace of the next N frames: one line per
-//                           draw with a snapshot of the D3D device state
-//   gears1_probe_skip       skip passes, scopes or the meshes of a policy
-//   gears1_probe_depth_bias_scale / _negate
-//                           change every guest depth bias at the D3D setter
 // Addresses and layouts are from the Ghidra project (NATIVE_RENDERER.md).
 
 #include "probes.h"
@@ -17,7 +11,6 @@
 #include <atomic>
 #include <bit>
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <iterator>
 #include <memory>
@@ -29,6 +22,8 @@
 
 #include <rex/cvar.h>
 #include <rex/logging/macros.h>
+#include <rex/memory/utils.h>
+#include <rex/system/xmemory.h>
 
 REXCVAR_DEFINE_BOOL(gears1_probe, false, "Gears1",
                     "Track UE3 render passes and write the draws per pass of every frame to "
@@ -38,7 +33,8 @@ REXCVAR_DEFINE_STRING(gears1_probe_trace_file, "probe_trace.log", "Gears1",
 REXCVAR_DEFINE_STRING(gears1_probe_trigger_file, "probe_trigger", "Gears1",
                       "When this file exists, trace every draw of the next "
                       "gears1_probe_trace_frames frames, then delete it");
-REXCVAR_DEFINE_INT32(gears1_probe_trace_frames, 1, "Gears1", "Frames traced per trigger");
+REXCVAR_DEFINE_INT32(gears1_probe_trace_frames, 1, "Gears1", "Frames traced per trigger")
+    .range(1, 100000);
 REXCVAR_DEFINE_STRING(gears1_probe_skip, "", "Gears1",
                       "Comma-separated probe names (tools/hook_table.py) to skip: passes and "
                       "scopes return early, policies skip the meshes they draw");
@@ -74,13 +70,11 @@ constexpr uint32_t kMeshDepthBias = 0xF0;
 constexpr uint32_t kMeshSlopeScaleDepthBias = 0xF4;
 constexpr uint32_t kMeshFlags = 0xF8;
 
-uint32_t Load32(const uint8_t* base, uint32_t address) {
-  uint32_t v;
-  std::memcpy(&v, base + address, sizeof(v));
-  return __builtin_bswap32(v);
+uint32_t Load32(uint8_t* base, uint32_t address) {
+  return rex::memory::load_and_swap<uint32_t>(rex::memory::GuestPtr(base, address));
 }
-float LoadFloat(const uint8_t* base, uint32_t address) {
-  return std::bit_cast<float>(Load32(base, address));
+float LoadFloat(uint8_t* base, uint32_t address) {
+  return rex::memory::load_and_swap<float>(rex::memory::GuestPtr(base, address));
 }
 
 // Settings, refreshed from the cvars once per frame (render thread).
@@ -192,7 +186,7 @@ std::string Where(const ThreadState& state) {
   return where;
 }
 
-std::string Surface(const uint8_t* base, uint32_t surface) {
+std::string Surface(uint8_t* base, uint32_t surface) {
   if (!surface) return "0";
   if (surface == Load32(base, kSceneColorSurface)) return "SceneColor";
   if (surface == Load32(base, kSceneDepthSurface)) return "SceneDepth";
@@ -203,7 +197,7 @@ std::string Surface(const uint8_t* base, uint32_t surface) {
 
 }  // namespace
 
-bool Gears1ProbeEnter(uint32_t id, PPCContext& ctx, uint8_t*) {
+bool Gears1ProbeEnter(uint32_t id, PPCContext& ctx) {
   if (!g_active.load(std::memory_order_relaxed)) return false;
   ThreadState& state = t_state;
   if (g_skip[id].load(std::memory_order_relaxed)) return true;
@@ -287,7 +281,7 @@ void Gears1ProbeDraw(uint32_t id, PPCContext& ctx, uint8_t* base) {
   Write(line);
 }
 
-void Gears1ProbeEvent(uint32_t id, PPCContext& ctx, uint8_t* base) {
+void Gears1ProbeEvent(uint32_t id, PPCContext& ctx) {
   if (!g_tracing.load(std::memory_order_relaxed)) return;
   char line[512];
   std::snprintf(line, sizeof(line),
@@ -296,7 +290,6 @@ void Gears1ProbeEvent(uint32_t id, PPCContext& ctx, uint8_t* base) {
                 ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.f1.f64,
                 Where(t_state).c_str());
   Write(line);
-  (void)base;
 }
 
 void Gears1ProbeDepthBiasPre(PPCContext& ctx, uint8_t*) {
@@ -311,7 +304,7 @@ void Gears1ProbeDepthBiasPre(PPCContext& ctx, uint8_t*) {
 
 bool Gears1ProbeWantsShaderHashes() { return g_tracing.load(std::memory_order_relaxed); }
 
-void Gears1ProbeFrameEnd(uint8_t*) {
+void Gears1ProbeFrameEnd() {
   Init();
   std::lock_guard<std::mutex> frame_lock(g_frame_mutex);
   UpdateSkip();
@@ -353,7 +346,7 @@ void Gears1ProbeFrameEnd(uint8_t*) {
     std::error_code ec;
     if (!trigger.empty() && std::filesystem::exists(trigger, ec)) {
       std::filesystem::remove(trigger, ec);
-      g_trace_frames_left = std::max(1, REXCVAR_GET(gears1_probe_trace_frames));
+      g_trace_frames_left = REXCVAR_GET(gears1_probe_trace_frames);
       g_tracing = true;
       Write(("# trace start F" + std::to_string(g_frame + 1) + " for " +
              std::to_string(g_trace_frames_left) + " frames\n")

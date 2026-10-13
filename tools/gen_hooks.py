@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """Generate src/hooks_gen.cpp: every override of a recompiled function that
-the project installs (PROBES.md). Replaces tools/gen_d3d_observe.py.
+the project installs (PROBES.md).
 
 Two sources, merged so each address gets exactly one strong override (a
 second one would be a duplicate symbol):
-- the D3D observer: every function in [LO, HI) called from outside that
-  range (from the generated call graph) is counted per frame when
-  gears1_d3d_observe is set; Swap (8223E860) writes the per-frame line.
-- tools/hook_table.py: probe hooks (passes, policies, draws, events) that
-  call into src/probes.cpp, plus extra pre hooks (shader dump, depth bias).
+- the D3D observer: every function of the Xbox D3D library [LO, HI) called
+  from outside it (from the generated call graph) is counted per frame when
+  gears1_d3d_observe is set; the 'frame' entry writes the per-frame line.
+- tools/hook_table.py: probes and pre/post hooks.
 
-Each override bumps its counter, runs its pre hooks and probe, then calls
-`__imp__sub_XXXXXXXX` (the original).
+Each override bumps its counter, runs its pre hooks and probe, calls
+`__imp__sub_XXXXXXXX` (the original), then runs its post hooks.
 
-Usage: tools/gen_hooks.py [LO HI]   (hex, default 821F8000 82280000)
+Usage: tools/gen_hooks.py
 """
 import collections, glob, os, re, sys
 
@@ -22,10 +21,9 @@ sys.path.insert(0, os.path.join(ROOT, 'tools'))
 from hook_table import PROBES  # noqa: E402
 
 GEN = os.path.join(ROOT, 'generated', 'default')
-LO = int(sys.argv[1], 16) if len(sys.argv) > 2 else 0x821F8000
-HI = int(sys.argv[2], 16) if len(sys.argv) > 2 else 0x82280000
-SWAP = 0x8223E860  # calls VdSwap: one call per presented frame
-KINDS = {'count': 'kCount', 'pass': 'kPass', 'scope': 'kScope', 'policy': 'kPolicy',
+LO, HI = 0x821F8000, 0x82280000
+SWAP = next(address for address, _, kind, _ in PROBES if kind == 'frame')
+KINDS = {'hook': 'kHook', 'pass': 'kPass', 'scope': 'kScope', 'policy': 'kPolicy',
          'draw': 'kDraw', 'event': 'kEvent', 'frame': 'kFrame'}
 
 fre = re.compile(r'^DEFINE_REX_FUNC\(sub_([0-9A-F]{8})\)')
@@ -134,7 +132,7 @@ for f in post_hooks:
 out += [
     '',
     '#define OBSERVE(index, name)                                              \\',
-    '  extern "C" void __imp__##name(PPCContext& __restrict, uint8_t*);         \\',
+    '  REX_EXTERN(__imp__##name);                                              \\',
     '  extern "C" REX_FUNC(name) {                                             \\',
     '    Count(index);                                                         \\',
     '    __imp__##name(ctx, base);                                             \\',
@@ -157,10 +155,10 @@ for address in sorted(set(observed) | set(probes)):
         body.append(f'  // {name}')
         body += [f'  {f}(ctx, base);' for f in extra.get('pre', [])]
         if extra.get('post'):
-            body.append('  const Gears1HookEntry entry{ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.f1.f64};')
+            body.append('  const Gears1HookEntry entry{ctx.r3.u32, ctx.r5.u32};')
             after += [f'  {f}(entry, ctx, base);' for f in extra['post']]
         if kind in ('pass', 'scope'):
-            body.append(f'  if (Gears1ProbeEnter({pid}, ctx, base)) {{')
+            body.append(f'  if (Gears1ProbeEnter({pid}, ctx)) {{')
             body.append('    ctx.r3.u64 = 0;')
             body.append('    return;')
             body.append('  }')
@@ -170,13 +168,13 @@ for address in sorted(set(observed) | set(probes)):
         elif kind == 'draw':
             body.append(f'  Gears1ProbeDraw({pid}, ctx, base);')
         elif kind == 'event':
-            body.append(f'  Gears1ProbeEvent({pid}, ctx, base);')
+            body.append(f'  Gears1ProbeEvent({pid}, ctx);')
         elif kind == 'frame':
-            after.append('  Gears1ProbeFrameEnd(base);')
+            after.append('  Gears1ProbeFrameEnd();')
     if address == SWAP:
         body.append('  const bool observe = REXCVAR_GET(gears1_d3d_observe);')
         after.append('  if (observe) DumpFrame();')
-    out += [f'extern "C" void __imp__{sym}(PPCContext& __restrict, uint8_t*);',
+    out += [f'REX_EXTERN(__imp__{sym});',
             f'extern "C" REX_FUNC({sym}) {{', *body, f'  __imp__{sym}(ctx, base);', *after, '}']
 
 path = os.path.join(ROOT, 'src', 'hooks_gen.cpp')

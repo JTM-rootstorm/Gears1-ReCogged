@@ -67,10 +67,9 @@ the SDK.
 
 - Recompiled functions: strong overrides from tools/gen_hooks.py
   (hook_table.py), one per symbol (PROBES.md).
-- Kernel/XAM imports: implemented in librexruntime.so. To verify per import:
-  whether a definition in our executable interposes the runtime's (ELF
-  executables normally win), so seams can switch one import at a time
-  without SDK changes. Otherwise override the game-side callers instead.
+- Kernel/XAM imports: a definition in our executable interposes the one in
+  librexruntime.so (see Status), so seams switch one import at a time
+  without SDK changes.
 - Every native replacement gets a cvar to fall back to the ReXGlue path while
   it matures, so regressions can be A/B tested.
 
@@ -83,10 +82,10 @@ the SDK.
   dlsym(RTLD_NEXT). SDL3 is statically linked into librexruntime.so and its
   3317 SDL_* symbols are exported, so seams use the runtime's SDL (one event
   pump, one window) through the SDK's SDL3 headers.
-- Seam 1 stage 1 built, untested: src/native_input.cpp replaces
+- Seam 1 stage 1 working (2026-10-11): src/native_input.cpp replaces
   XamInputGetState/GetCapabilities/SetState with SDL gamepads + keyboard/
   mouse-button mapping (gears1_native_input, gears1_native_input_keyboard).
-- Seam 1 stage 2 built, untested: src/mouse_look.cpp, a post hook on
+- Seam 1 stage 2 working (2026-10-11): src/mouse_look.cpp, a post hook on
   APlayerController::Tick 823CB580 (after PlayerTick ran UpdateRotation, only
   for TickType 2 = LEVELTICK_All) adds SDL relative mouse motion straight to
   AActor::Rotation (+0xD8 pitch, +0xDC yaw), so the script's look
