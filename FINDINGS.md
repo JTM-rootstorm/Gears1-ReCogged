@@ -1338,3 +1338,20 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   unpatched originals (D3D patches their vfetch at bind time for the vertex
   declaration, so a native renderer must translate per declaration or make
   fetch formats dynamic).
+- OFFLINE == RUNTIME TRANSLATION (2026-10-14): ran the game once with a
+  plugin that dumps the Vulkan backend's translated SPIR-V (dump_shaders;
+  SDK local/shader-tools 377fa21, Vulkan had no Translation::Dump call) from
+  a separate run folder (gears1_captures/dumprun, hard-linked exe + that
+  plugin). At startup it translated the pipeline storage (1,834 pipelines):
+  1,388 translations of 839 shaders. tools/compare_shader_translations.py
+  re-translated each offline with rexgpu-shader-tool --rte (this RTX 4080's
+  features = the tool's all-on set + RoundingModeRTE) and the runtime's
+  modification: 1,388/1,388 byte-identical (1,280 PS from the package
+  caches, 6 PS + all 102 VS from the runtime's own microcode: every VS the
+  runtime used is the bind-time-patched form, none matches the packages'
+  162 originals). Control without --rte: 1,388/1,388 differ. The runtime's
+  ucode dump is host byte order; 748 of its 839 programs match package
+  programs byte-swapped. => Offline translation reproduces the runtime
+  exactly given the variant (modification) and device features; what a
+  native renderer must add is the set of variants per shader and the VS
+  vertex-declaration patching.
