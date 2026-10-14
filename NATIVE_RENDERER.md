@@ -342,11 +342,14 @@ destined for Canary (no XDK-derived information).
   - Depth/stencil resolve: not supported ("depth/stencil targets do not
     support multisample resolves"). UE3's sample-0 depth resolve needs either
     1x rendering (GTilingMode 4, what gears1_black_shading_fix already
-    selects, has no 2x MSAA) or a shader that reads sample 0 and writes depth.
-    SDL accepts creating 2x MSAA colour and depth (D24S8, D32FS8) textures
-    with SAMPLER usage on this GPU; reading them in a shader (texelFetch on a
-    multisampled texture) is undocumented and untested. Plan: 1x for
-    bring-up, MSAA (or post AA) later.
+    selects, has no 2x MSAA) or reading sample 0 in a shader, which SDL_GPU
+    forbids: "For multisample textures: usage cannot contain SAMPLER or
+    STORAGE flags" (SDL_CreateGPUTexture assertion with the debug device;
+    without debug mode the creation is not validated and only looks like it
+    works). So no shader access to individual MSAA samples at all, colour or
+    depth. Plan: render at 1x and use post AA (FXAA/SMAA-style) instead of
+    MSAA. Native MSAA would need an SDL patch (Vulkan and Metal both support
+    sampled multisample images) once Gears owns its SDL build.
   - Depth formats: SDL guarantees only D16 plus either D24 or D32F, and
     either D24S8 or D32FS8, so query SDL_GPUTextureSupportsFormat. This GPU
     has all five, at 1x/2x/4x/8x and with SAMPLER usage. Gears needs stencil
