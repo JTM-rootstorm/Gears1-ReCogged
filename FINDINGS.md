@@ -1377,3 +1377,25 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   patching per vertex declaration (the 162 originals are unpatched; every
   VS the runtime used was patched), param gen for VPOS shaders (position
   recorded by the runtime, 3 seen).
+- HOST VERTEX INPUT (2026-10-14, SDK local/shader-tools). The packages'
+  vertex shaders are unpatched: every fetch is `vfetch_full rN, r0.x, vf0`
+  with no format; D3D's patching at vertex declaration bind time writes
+  format, offset, stride, signedness, full/mini and the destination
+  swizzle (seen by diffing 90 runtime-patched VS against their originals).
+  All 1,626 fetches index r0.x from vf0 before r0 is written, so the fetch
+  index is the vertex index. The shader container's vertex shader record
+  lists the elements (fetch instruction address, D3DDECLUSAGE, usage
+  index; layout per hedge-dev/XenosRecomp): 15 usages across all 162 VS
+  (POSITION0, BLENDWEIGHT0, BLENDINDICES0, NORMAL0, TANGENT0, BINORMAL0,
+  COLOR0-1, TEXCOORD0-3/5-7), mapped to fixed locations 0-15 so a
+  pipeline's vertex layout depends only on the declaration. The SPIR-V
+  translator can now load a float4 vertex input for a mapped fetch
+  (rexgpu-shader-tool --host-vertex-input; translate_shaders.py
+  --native-variants uses it for every VS): 162/162 VS map every fetch, pass
+  spirv-val and no longer read shared memory. Host default fill (0, 0, 1
+  for missing y/z/w) matches all 478 patched fetch swizzles. Formats the
+  game's declarations use: FMT_32[_32[_32[_32]]]_FLOAT and FMT_8_8_8_8
+  (normalized or integer, signed or not). For the native renderer:
+  byte-swap vertex buffers on upload; 8_8_8_8 integer (unnormalized, e.g.
+  packed normals) has no SDL_GPU float format (no USCALED), so convert those
+  elements to float (or half) on upload.

@@ -8,7 +8,9 @@ By default each shader is translated with its default modification. With
 --native-variants, each gets the variants a native renderer (1x rendering,
 host depth formats) needs, from the tool's analysis of the shader alone:
 - vertex shaders: interpolator mask 0xFFFF (every output, zero unless the
-  shader writes it);
+  shader writes it), and vertex fetches read host vertex inputs located by
+  their element's usage (--host-vertex-input): the vertex layout comes from
+  the pipeline, so the unpatched shaders serve every vertex declaration;
 - pixel shaders: their own input mask, which is always contiguous from
   interpolator 0, so input i is at location i like the vertex shader's
   output i; depth/stencil mode kNoModifiers, plus kEarlyHint when the
@@ -67,9 +69,10 @@ def translate(tool, src, out_dir, options, variants):
     analysis['kind'] = fields[1]
     os.remove(prefix + '.spv')
     results = []
+    variant_options = options + (['--host-vertex-input'] if analysis['kind'] == 'vs' else [])
     for modification in native_variants(analysis):
         variant = f'{prefix}_{modification:016x}'
-        r = run_tool(tool, src, variant, options, modification)
+        r = run_tool(tool, src, variant, variant_options, modification)
         if r.returncode != 0:
             results.append((name, f'{modification:016x}', 'translate', r.stderr.strip()[-200:]))
         else:
