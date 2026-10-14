@@ -1306,3 +1306,18 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   fix/xam-profile-settings; the runtime is built from it. Gears1 is a git repo
   (43de0b9 initial, dcf3798 cleanup). User-tested: input, mouse look, blood
   pools, no spikes/tint/device lost.
+- UE3 PACKAGES UNPACKED (2026-10-14, tools/upk.py): CookedXenon/*.xxx are
+  UE3 packages version 374 / engine 2451, big-endian. 508 uncompressed, 1224
+  with LZO-compressed chunks (compression flag 2, not LZX), 13 whole-file
+  compressed (Core, Engine, GameFramework, the online subsystems,
+  UnrealScriptTest, WarfareGame, WarfareGame_LOC_*: little-endian chunk header
+  + LZO blocks around a normal package). Export entries are 17 words (no
+  trailing package flags). 448 packages carry a ShaderCache export
+  "SeekFreeShaderCache" (Engine.xxx: 1.75 MB of global shaders). Scanning them
+  for Xenos shader containers (flags 0x102A11xx, header size, microcode size;
+  header immediately followed by the microcode) gives 18,595 unique shaders
+  (18,433 PS, 162 VS). Of the 830 shaders dumped during play, 746 are
+  byte-identical in the caches; the 84 others are 83 VS (D3D patches VS
+  microcode in place for the vertex declaration at bind time) and 1 PS.
+  => The full shader set can be translated offline (AOT), no runtime
+  translation needed; VS fetch patching must be handled by the translator.
