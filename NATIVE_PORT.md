@@ -52,9 +52,9 @@ and save system.
 |---|---|---|---|---|---|
 | 1 | Input | XamInputGetState + HID | UXenonClient input path -> SDL; mouse/keyboard into UE3 input axes | small | aim without controller accel; first seam proven |
 | 2 | Renderer | Xenos plugin + Vd* | RHI/D3D level (NATIVE_RENDERER.md) | large | no EDRAM/emulation bugs |
-| 3 | Files/saves | Nt*File, XamContent, VFS/STFS | UE3 file manager + save system -> host files | medium | most of the FS/XAM surface gone |
+| 3 | Files/saves | Nt*File, XamContent, VFS/STFS | UE3 file manager + save system -> host files (SDL storage / pref path) | medium | most of the FS/XAM surface gone |
 | 3b | Online | NetDll, Live XAM | null OnlineSubsystem / net driver | small | dead weight gone |
-| 4 | Audio | XAudio driver + XMA emulation | UXeAudioDevice -> native mixer, FFmpeg XMA | medium-large | APU/XMA emulation gone |
+| 4 | Audio | XAudio driver + XMA emulation | UXeAudioDevice -> native mixer on SDL audio streams, FFmpeg XMA | medium-large | APU/XMA emulation gone |
 | 5 | Movies | Bink on emulated GPU | native Bink decode (FFmpeg) into the native renderer | medium | follows #2 |
 | 6 | Profile/UI | XamShow*, users, achievements | small shims | small | cleanup |
 | 7 | Threads/sync/memory | ~70 imports | keep; optionally UE3 FRunnableThread/FCriticalSection/FEvent -> host | large | low |
@@ -62,6 +62,17 @@ and save system.
 Each seam is done when its imports are no longer called in normal play
 (verify with call counts) and the replacement lives in this project, not in
 the SDK.
+
+## Platform: SDL3
+
+Decided (2026-10-14): every native seam is built on SDL3 for portability
+(Linux first, macOS/Metal possible later): SDL_GPU for the renderer, SDL
+audio streams for sound, SDL gamepad/keyboard/mouse for input, SDL storage /
+pref paths for saves and settings, SDL threads where host threads are needed.
+No Microsoft or Xbox libraries are reimplemented for their own sake: each
+seam replaces the game's engine layer (UE3's platform classes) directly.
+While ReXGlue is underneath, the seams use the SDL3 it exports (3.5.0, all
+SDL_* symbols incl. SDL_GPU); never link a second SDL.
 
 ## Mechanisms
 

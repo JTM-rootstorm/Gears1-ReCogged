@@ -2,7 +2,8 @@
 
 Goal: replace Xenos GPU emulation (PM4 packets → EDRAM emulation → translated
 microcode) with a renderer that implements the game's own Direct3D calls on
-Vulkan, the way Unleashed Recompiled did. Keep the emulated path as a
+SDL_GPU (Vulkan on Linux, Metal possible later; NATIVE_PORT.md "Platform:
+SDL3"), in the spirit of Unleashed Recompiled. Keep the emulated path as a
 switchable fallback and as the reference to compare against.
 
 Status: planning. Findings and progress go in FINDINGS.md.
@@ -84,7 +85,7 @@ come from one translator with Xenia-equivalent op ordering.
    - Per-frame call trace tool: passes, render targets, formats, resolves.
    - Shader census: count, stages, features used (relative addressing,
      loops, predication, vfetch formats).
-1. **Skeleton**: detached mode, Vulkan device + swapchain, hook device
+1. **Skeleton**: detached mode, SDL_GPU device + swapchain, hook device
    creation and Present; clear-to-colour each frame; ImGui overlay works.
 2. **Resources**: textures (untile + convert, reuse SDK code), vertex and
    index buffers (big-endian handling), render targets as real images,
@@ -323,4 +324,7 @@ destined for Canary (no XDK-derived information).
   (Canary, which shares Xenia's translator, shows the same aim-down-sights
   spikes on this NVIDIA card; its other upstream issues were the player
   going semi-transparent while idle and seeing through some walls).
-- Vulkan only, or an abstraction (Unleashed's) for D3D12 later?
+- Backend: decided 2026-10-14, SDL_GPU (shaders as SPIR-V, MSL via
+  SPIRV-Cross for Metal). Check before the skeleton phase that SDL_GPU
+  covers what the RHI needs (MSAA resolve, depth formats, occlusion
+  queries; anything missing needs a workaround in the renderer).
