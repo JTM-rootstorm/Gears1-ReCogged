@@ -14,7 +14,9 @@ host depth formats) needs, from the tool's analysis of the shader alone:
 - pixel shaders: their own input mask, which is always contiguous from
   interpolator 0, so input i is at location i like the vertex shader's
   output i; depth/stencil mode kNoModifiers, plus kEarlyHint when the
-  shader allows implicit early Z (draws without alpha-dependent coverage).
+  shader allows implicit early Z (draws without alpha-dependent coverage);
+  PsParamGen (VPOS) in the register the shader's header names, if any,
+  which the game always enables for those shaders (never for points).
 Equivalent to the runtime's per-pair mask (VS writes & PS inputs): inputs
 the vertex shader doesn't write read 0 either way.
 
@@ -27,6 +29,8 @@ first error).
 import collections, concurrent.futures, os, subprocess, sys
 
 # SpirvShaderTranslator::Modification fields (spirv_translator.h).
+PS_PARAM_GEN_ENABLE = 1 << 40
+PS_PARAM_GEN_INTERPOLATOR_SHIFT = 41
 PS_DEPTH_STENCIL_SHIFT = 46
 PS_NO_MODIFIERS, PS_EARLY_HINT = 0, 1
 VS_ALL_INTERPOLATORS = 0xFFFF
@@ -36,9 +40,12 @@ def native_variants(analysis):
     interpolators = int(analysis['interpolators'], 16)
     if analysis['kind'] == 'vs':
         return [VS_ALL_INTERPOLATORS]
-    variants = [interpolators | PS_NO_MODIFIERS << PS_DEPTH_STENCIL_SHIFT]
+    base = interpolators
+    if analysis['vpos'] != '-':
+        base |= PS_PARAM_GEN_ENABLE | int(analysis['vpos']) << PS_PARAM_GEN_INTERPOLATOR_SHIFT
+    variants = [base | PS_NO_MODIFIERS << PS_DEPTH_STENCIL_SHIFT]
     if analysis['early_z_allowed'] == '1':
-        variants.append(interpolators | PS_EARLY_HINT << PS_DEPTH_STENCIL_SHIFT)
+        variants.append(base | PS_EARLY_HINT << PS_DEPTH_STENCIL_SHIFT)
     return variants
 
 def run_tool(tool, src, prefix, options, modification=None):

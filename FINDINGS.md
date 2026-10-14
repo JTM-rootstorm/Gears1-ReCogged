@@ -1399,3 +1399,17 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   byte-swap vertex buffers on upload; 8_8_8_8 integer (unnormalized, e.g.
   packed normals) has no SDL_GPU float format (no USCALED), so convert those
   elements to float (or half) on upload.
+- VPOS PIXEL SHADERS (2026-10-14): the pixel shader record's word at +0xC
+  holds the VPOS (PsParamGen) register in bits 8:15 (XenosRecomp's
+  "svPos register") and a use flag in bit 1: 12 shaders have 0x106
+  (register 1, flag set), all others 0x004/0x008/0 (flag clear). The 3
+  runtime variants with param gen are exactly 3 of those 12, at register 1;
+  every other shader the runtime ran had no param gen. Native rule: shaders
+  with the flag always get PsParamGen at that register (param_gen_point 0;
+  the game draws no points with them), keeping their contiguous input mask
+  (the param gen register's input is declared but not loaded, so locations
+  still match the 0xFFFF vertex shaders). Offline translation with the
+  runtime's modification is byte-identical for all 3; the native variants
+  are valid (they read zero-initialised VS outputs where the runtime's
+  narrower pair mask used constant zeros). --native-variants: 12 shaders,
+  24 modules with param gen; still 34,166 modules, all valid.
