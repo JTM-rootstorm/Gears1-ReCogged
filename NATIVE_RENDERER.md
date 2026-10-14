@@ -325,6 +325,12 @@ destined for Canary (no XDK-derived information).
   spikes on this NVIDIA card; its other upstream issues were the player
   going semi-transparent while idle and seeing through some walls).
 - Backend: decided 2026-10-14, SDL_GPU (shaders as SPIR-V, MSL via
-  SPIRV-Cross for Metal). Check before the skeleton phase that SDL_GPU
-  covers what the RHI needs (MSAA resolve, depth formats, occlusion
-  queries; anything missing needs a workaround in the renderer).
+  SPIRV-Cross for Metal). Checked against SDL 3.5's SDL_gpu.h: no access to
+  the underlying Vulkan handles (only SDL_GPUVulkanOptions to enable extra
+  extensions/features at device creation), so SDL_GPU and raw Vulkan can't
+  be mixed; no occlusion queries; depth bias is plain constant/slope/clamp
+  (on float depth it shrinks at low depths, the blood-pool problem). Plan:
+  shader-side depth offset for UE3's decal draws, skip the occlusion query
+  pass (draw everything). Once Gears owns its SDL build (no ReXGlue), a small
+  SDL patch or an upstream SDL feature is the fallback. Still to check
+  before the skeleton phase: MSAA resolve and depth formats.
