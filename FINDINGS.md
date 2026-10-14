@@ -1355,3 +1355,25 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   exactly given the variant (modification) and device features; what a
   native renderer must add is the set of variants per shader and the VS
   vertex-declaration patching.
+- AOT SHADER VARIANTS (2026-10-14). Runtime variants observed (pipeline
+  storage, 1,388): VS vary only in the interpolator mask (= VS writes & PS
+  inputs, so pair-dependent; 85 equal the VS's own writes, 17 a subset);
+  every other VS field is 0 (no clip planes, point size, vertex kill,
+  tessellation; host type kVertex). PS vary only in depth/stencil mode:
+  kEarlyHint exactly when the shader's analysis allows implicit early Z
+  (679/679), kNoModifiers otherwise (78/78), plus the float24 emulation
+  modes (532) a native renderer with host depth formats doesn't need;
+  centroid only with MSAA; param gen (VPOS) in 3 variants. Analysis of all
+  shaders (rexgpu-shader-tool now prints it): every PS input mask is
+  contiguous from interpolator 0 (18,436/18,436); no shader uses dynamic
+  register addressing; 14,472 of 17,070 PS programs allow early Z.
+  Rule set for a native renderer (tools/translate_shaders.py
+  --native-variants): VS mask 0xFFFF (outputs are zero unless written),
+  PS own input mask (so input i = location i on both sides, any pair
+  links), PS kNoModifiers + kEarlyHint when allowed. Same results as the
+  runtime's per-pair mask (unwritten inputs read 0 either way). All 18,595
+  shaders -> 34,166 modules (162 VS, 34,004 PS), all pass spirv-val, 36 s
+  with 10 jobs, 1.6 GB unoptimised SPIR-V. Still open: VS bind-time
+  patching per vertex declaration (the 162 originals are unpatched; every
+  VS the runtime used was patched), param gen for VPOS shaders (position
+  recorded by the runtime, 3 seen).
