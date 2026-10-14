@@ -17,7 +17,7 @@ REXCVAR_DEFINE_BOOL(gears1_d3d_observe, false, "Gears1",
 REXCVAR_DEFINE_STRING(gears1_d3d_observe_file, "d3d_observe.log", "Gears1",
                       "Output file for gears1_d3d_observe");
 
-const uint32_t kGears1ProbeCount = 61;
+const uint32_t kGears1ProbeCount = 62;
 const Gears1ProbeInfo kGears1Probes[] = {
     {0x8223E860, "Swap", Gears1ProbeKind::kFrame},
     {0x8223A840, "DeviceInit", Gears1ProbeKind::kHook},
@@ -80,6 +80,7 @@ const Gears1ProbeInfo kGears1Probes[] = {
     {0x823CB580, "PlayerControllerTick", Gears1ProbeKind::kHook},
     {0x82222B98, "SetVertexShader", Gears1ProbeKind::kHook},
     {0x82222808, "SetPixelShader", Gears1ProbeKind::kHook},
+    {0x82220858, "SetTexture", Gears1ProbeKind::kHook},
 };
 
 namespace {
@@ -188,6 +189,7 @@ void DumpFrame() {
 }
 }  // namespace
 
+void Gears1NativeTexturesOnSetTexture(PPCContext& ctx, uint8_t* base);
 void Gears1OnSetPixelShader(PPCContext& ctx, uint8_t* base);
 void Gears1OnSetVertexShader(PPCContext& ctx, uint8_t* base);
 void Gears1ProbeDepthBiasPre(PPCContext& ctx, uint8_t* base);
@@ -314,7 +316,13 @@ OBSERVE(108, sub_82220770)
 OBSERVE(109, sub_82220790)
 OBSERVE(110, sub_82220820)
 OBSERVE(111, sub_82220840)
-OBSERVE(112, sub_82220858)
+REX_EXTERN(__imp__sub_82220858);
+extern "C" REX_FUNC(sub_82220858) {
+  Count(112);
+  // SetTexture
+  Gears1NativeTexturesOnSetTexture(ctx, base);
+  __imp__sub_82220858(ctx, base);
+}
 OBSERVE(113, sub_82221980)
 OBSERVE(114, sub_82221A68)
 OBSERVE(115, sub_82221D78)

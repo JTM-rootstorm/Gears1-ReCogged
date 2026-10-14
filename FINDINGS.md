@@ -1424,3 +1424,14 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   1280x720 (from the game's present parameters), no errors; the emulated
   window keeps running the game (detached mode would hang: D3D waits on
   the GPU consuming its PM4).
+- NATIVE TEXTURES, first cut (2026-10-14, src/native_textures.cpp): a
+  texture object's GPU fetch constant is the six dwords at +0x1C (D3D
+  SetTexture 82220858 reads tex+0x1C..+0x30 and merges them into the
+  device's sampler state at dev+0x400+sampler*24; the texture pointer goes
+  to dev+0x2FF0+sampler*4). Pre hook on SetTexture decodes each new
+  texture's base level (2D only) with the runtime's exported texture
+  helpers (GetSubresourcesFromFetchConstant, Untile, CopySwapBlock,
+  FormatInfo; physical address via the 0xA0000000 mirror) into
+  R8/R8G8/R8G8B8A8/BC1-5/RGBA16F/R32F; the main thread uploads and the
+  overlay shows a paged browser (guest channel order, no swizzle) with
+  counts per unsupported reason.

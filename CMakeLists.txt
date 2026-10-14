@@ -17,6 +17,7 @@ set(GEARS1RECOMP_SOURCES
     src/mouse_look.cpp
     src/native_input.cpp
     src/native_renderer.cpp
+    src/native_textures.cpp
     src/probes.cpp
     src/shader_dump.cpp
     third_party/imgui/imgui_impl_sdlgpu3.cpp

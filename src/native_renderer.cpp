@@ -23,6 +23,7 @@
 #include <rex/system/xmemory.h>
 
 #include "imgui_impl_sdlgpu3.h"
+#include "native_renderer.h"
 #include "probes.h"
 
 REXCVAR_DEFINE_BOOL(gears1_native_renderer, false, "Gears1",
@@ -97,6 +98,8 @@ void Present(void*) {
     return;
   }
 
+  NativeTexturesUpload(g_device, command_buffer);
+
   const uint64_t now = SDL_GetTicksNS();
   if (g_last_present_ns) {
     g_frame_ms = (now - g_last_present_ns) / 1e6;
@@ -121,6 +124,7 @@ void Present(void*) {
               (unsigned long long)g_presented_frames);
   ImGui::Text("%.2f ms", g_frame_ms);
   ImGui::End();
+  NativeTexturesDrawBrowser();
   ImGui::Render();
   ImDrawData* draw_data = ImGui::GetDrawData();
   ImGui_ImplSDLGPU3_PrepareDrawData(draw_data, command_buffer);

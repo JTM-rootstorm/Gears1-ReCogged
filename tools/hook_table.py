@@ -100,4 +100,8 @@ PROBES = [
     # Shader binds (shader dump + hash cache)
     (0x82222B98, 'SetVertexShader', 'hook', {'pre': ['Gears1OnSetVertexShader']}),
     (0x82222808, 'SetPixelShader', 'hook', {'pre': ['Gears1OnSetPixelShader']}),
+
+    # SetTexture(device, sampler, texture): native renderer textures
+    # (src/native_textures.cpp)
+    (0x82220858, 'SetTexture', 'hook', {'pre': ['Gears1NativeTexturesOnSetTexture']}),
 ]
