@@ -6,7 +6,8 @@ SDL_GPU (Vulkan on Linux, Metal possible later; NATIVE_PORT.md "Platform:
 SDL3"), in the spirit of Unleashed Recompiled. Keep the emulated path as a
 switchable fallback and as the reference to compare against.
 
-Status: planning. Findings and progress go in FINDINGS.md.
+Status: phase 1 skeleton (src/native_renderer.cpp). Findings and progress go
+in FINDINGS.md.
 
 Decided (2026-10-10): hook at the Xbox D3D API level; prototype BOTH shader
 translators on the skinning VS before choosing.
@@ -85,8 +86,17 @@ come from one translator with Xenia-equivalent op ordering.
    - Per-frame call trace tool: passes, render targets, formats, resolves.
    - Shader census: count, stages, features used (relative addressing,
      loops, predication, vfetch formats).
-1. **Skeleton**: detached mode, SDL_GPU device + swapchain, hook device
-   creation and Present; clear-to-colour each frame; ImGui overlay works.
+1. **Skeleton**: SDL_GPU device + swapchain, hook device creation and
+   Present; clear-to-colour each frame; ImGui overlay works. Built as a
+   second window next to the emulated one (gears1_native_renderer), not
+   detached: until every D3D call that feeds the GPU is replaced, the
+   game's D3D writes PM4 and waits on the GPU (ring buffer space, fences,
+   the vsync interrupt), so the emulated GPU must keep consuming it. The
+   side-by-side window is also where later phases compare against the
+   reference. Device init = 8223A840(device, D3DPRESENT_PARAMETERS*): the
+   only D3D function calling VdInitializeEngines, called by UE3's back
+   buffer setup 824A4D48 (which allocates and zeroes the 0x5080-byte
+   device itself).
 2. **Resources**: textures (untile + convert, reuse SDK code), vertex and
    index buffers (big-endian handling), render targets as real images,
    Resolve → copy/blit, MSAA as native multisampling.

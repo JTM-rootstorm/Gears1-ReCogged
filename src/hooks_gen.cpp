@@ -17,9 +17,10 @@ REXCVAR_DEFINE_BOOL(gears1_d3d_observe, false, "Gears1",
 REXCVAR_DEFINE_STRING(gears1_d3d_observe_file, "d3d_observe.log", "Gears1",
                       "Output file for gears1_d3d_observe");
 
-const uint32_t kGears1ProbeCount = 60;
+const uint32_t kGears1ProbeCount = 61;
 const Gears1ProbeInfo kGears1Probes[] = {
     {0x8223E860, "Swap", Gears1ProbeKind::kFrame},
+    {0x8223A840, "DeviceInit", Gears1ProbeKind::kHook},
     {0x825550A8, "FDrawSceneCommand_Execute", Gears1ProbeKind::kPass},
     {0x82553258, "FSceneRenderer_Render", Gears1ProbeKind::kPass},
     {0x82553EA0, "RenderPrePass", Gears1ProbeKind::kPass},
@@ -191,6 +192,8 @@ void Gears1OnSetPixelShader(PPCContext& ctx, uint8_t* base);
 void Gears1OnSetVertexShader(PPCContext& ctx, uint8_t* base);
 void Gears1ProbeDepthBiasPre(PPCContext& ctx, uint8_t* base);
 void Gears1MouseLookAfterTick(const Gears1HookEntry& entry, PPCContext& ctx, uint8_t* base);
+void Gears1NativeRendererDeviceInit(const Gears1HookEntry& entry, PPCContext& ctx, uint8_t* base);
+void Gears1NativeRendererFrame(const Gears1HookEntry& entry, PPCContext& ctx, uint8_t* base);
 
 #define OBSERVE(index, name)                                              \
   REX_EXTERN(__imp__##name);                                              \
@@ -394,7 +397,7 @@ extern "C" REX_FUNC(sub_82229398) {
   Count(178);
   // SetSlopeScaleDepthBias
   Gears1ProbeDepthBiasPre(ctx, base);
-  Gears1ProbeEvent(56, ctx);
+  Gears1ProbeEvent(57, ctx);
   __imp__sub_82229398(ctx, base);
 }
 REX_EXTERN(__imp__sub_82229460);
@@ -402,7 +405,7 @@ extern "C" REX_FUNC(sub_82229460) {
   Count(179);
   // SetDepthBias
   Gears1ProbeDepthBiasPre(ctx, base);
-  Gears1ProbeEvent(55, ctx);
+  Gears1ProbeEvent(56, ctx);
   __imp__sub_82229460(ctx, base);
 }
 OBSERVE(180, sub_82229AD8)
@@ -419,14 +422,14 @@ REX_EXTERN(__imp__sub_8222B068);
 extern "C" REX_FUNC(sub_8222B068) {
   Count(190);
   // SetRenderTarget
-  Gears1ProbeEvent(53, ctx);
+  Gears1ProbeEvent(54, ctx);
   __imp__sub_8222B068(ctx, base);
 }
 REX_EXTERN(__imp__sub_8222B398);
 extern "C" REX_FUNC(sub_8222B398) {
   Count(191);
   // SetDepthStencilSurface
-  Gears1ProbeEvent(54, ctx);
+  Gears1ProbeEvent(55, ctx);
   __imp__sub_8222B398(ctx, base);
 }
 OBSERVE(192, sub_8222CB88)
@@ -434,14 +437,14 @@ REX_EXTERN(__imp__sub_8222CC48);
 extern "C" REX_FUNC(sub_8222CC48) {
   Count(193);
   // Clear
-  Gears1ProbeEvent(52, ctx);
+  Gears1ProbeEvent(53, ctx);
   __imp__sub_8222CC48(ctx, base);
 }
 REX_EXTERN(__imp__sub_8222CFF8);
 extern "C" REX_FUNC(sub_8222CFF8) {
   Count(194);
   // BeginVertices
-  Gears1ProbeDraw(49, ctx, base);
+  Gears1ProbeDraw(50, ctx, base);
   __imp__sub_8222CFF8(ctx, base);
 }
 OBSERVE(195, sub_8222D4B0)
@@ -449,21 +452,21 @@ REX_EXTERN(__imp__sub_8222D4F8);
 extern "C" REX_FUNC(sub_8222D4F8) {
   Count(196);
   // BeginIndexedVertices
-  Gears1ProbeDraw(50, ctx, base);
+  Gears1ProbeDraw(51, ctx, base);
   __imp__sub_8222D4F8(ctx, base);
 }
 REX_EXTERN(__imp__sub_8222DA48);
 extern "C" REX_FUNC(sub_8222DA48) {
   Count(197);
   // DrawVertices
-  Gears1ProbeDraw(48, ctx, base);
+  Gears1ProbeDraw(49, ctx, base);
   __imp__sub_8222DA48(ctx, base);
 }
 REX_EXTERN(__imp__sub_8222DE50);
 extern "C" REX_FUNC(sub_8222DE50) {
   Count(198);
   // DrawIndexedVertices
-  Gears1ProbeDraw(47, ctx, base);
+  Gears1ProbeDraw(48, ctx, base);
   __imp__sub_8222DE50(ctx, base);
 }
 OBSERVE(199, sub_8222E4C8)
@@ -497,20 +500,29 @@ REX_EXTERN(__imp__sub_82235528);
 extern "C" REX_FUNC(sub_82235528) {
   Count(226);
   // Resolve
-  Gears1ProbeEvent(51, ctx);
+  Gears1ProbeEvent(52, ctx);
   __imp__sub_82235528(ctx, base);
 }
 OBSERVE(227, sub_82236370)
 OBSERVE(228, sub_822364F8)
 OBSERVE(229, sub_822369F0)
-OBSERVE(230, sub_8223A840)
+REX_EXTERN(__imp__sub_8223A840);
+extern "C" REX_FUNC(sub_8223A840) {
+  Count(230);
+  // DeviceInit
+  const Gears1HookEntry entry{ctx.r3.u32, ctx.r4.u32, ctx.r5.u32};
+  __imp__sub_8223A840(ctx, base);
+  Gears1NativeRendererDeviceInit(entry, ctx, base);
+}
 OBSERVE(231, sub_8223E6D8)
 REX_EXTERN(__imp__sub_8223E860);
 extern "C" REX_FUNC(sub_8223E860) {
   Count(232);
   // Swap
+  const Gears1HookEntry entry{ctx.r3.u32, ctx.r4.u32, ctx.r5.u32};
   const bool observe = REXCVAR_GET(gears1_d3d_observe);
   __imp__sub_8223E860(ctx, base);
+  Gears1NativeRendererFrame(entry, ctx, base);
   Gears1ProbeFrameEnd();
   if (observe) DumpFrame();
 }
@@ -758,399 +770,399 @@ OBSERVE(473, sub_82279468)
 REX_EXTERN(__imp__sub_823CB580);
 extern "C" REX_FUNC(sub_823CB580) {
   // PlayerControllerTick
-  const Gears1HookEntry entry{ctx.r3.u32, ctx.r5.u32};
+  const Gears1HookEntry entry{ctx.r3.u32, ctx.r4.u32, ctx.r5.u32};
   __imp__sub_823CB580(ctx, base);
   Gears1MouseLookAfterTick(entry, ctx, base);
 }
 REX_EXTERN(__imp__sub_82491DD8);
 extern "C" REX_FUNC(sub_82491DD8) {
   // RenderOcclusionQueries
-  if (Gears1ProbeEnter(4, ctx)) {
+  if (Gears1ProbeEnter(5, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
   __imp__sub_82491DD8(ctx, base);
-  Gears1ProbeLeave(4);
+  Gears1ProbeLeave(5);
 }
 REX_EXTERN(__imp__sub_82511180);
 extern "C" REX_FUNC(sub_82511180) {
   // PostBloom
-  if (Gears1ProbeEnter(23, ctx)) {
+  if (Gears1ProbeEnter(24, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
   __imp__sub_82511180(ctx, base);
-  Gears1ProbeLeave(23);
+  Gears1ProbeLeave(24);
 }
 REX_EXTERN(__imp__sub_82519318);
 extern "C" REX_FUNC(sub_82519318) {
   // LightDirectional_NoStaticShadowing
-  Gears1ProbePolicy(30);
+  Gears1ProbePolicy(31);
   __imp__sub_82519318(ctx, base);
 }
 REX_EXTERN(__imp__sub_82519750);
 extern "C" REX_FUNC(sub_82519750) {
   // LightDirectional_ShadowTexture
-  Gears1ProbePolicy(31);
+  Gears1ProbePolicy(32);
   __imp__sub_82519750(ctx, base);
 }
 REX_EXTERN(__imp__sub_82519B88);
 extern "C" REX_FUNC(sub_82519B88) {
   // LightDirectional_ShadowVertexBuffer
-  Gears1ProbePolicy(32);
+  Gears1ProbePolicy(33);
   __imp__sub_82519B88(ctx, base);
 }
 REX_EXTERN(__imp__sub_825205F8);
 extern "C" REX_FUNC(sub_825205F8) {
   // PostDOFAndBloom
-  if (Gears1ProbeEnter(19, ctx)) {
+  if (Gears1ProbeEnter(20, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
   __imp__sub_825205F8(ctx, base);
-  Gears1ProbeLeave(19);
+  Gears1ProbeLeave(20);
 }
 REX_EXTERN(__imp__sub_82521FF8);
 extern "C" REX_FUNC(sub_82521FF8) {
   // PostDOF
-  if (Gears1ProbeEnter(21, ctx)) {
-    ctx.r3.u64 = 0;
-    return;
-  }
-  __imp__sub_82521FF8(ctx, base);
-  Gears1ProbeLeave(21);
-}
-REX_EXTERN(__imp__sub_825307D0);
-extern "C" REX_FUNC(sub_825307D0) {
-  // PostMotionBlur
   if (Gears1ProbeEnter(22, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
-  __imp__sub_825307D0(ctx, base);
+  __imp__sub_82521FF8(ctx, base);
   Gears1ProbeLeave(22);
+}
+REX_EXTERN(__imp__sub_825307D0);
+extern "C" REX_FUNC(sub_825307D0) {
+  // PostMotionBlur
+  if (Gears1ProbeEnter(23, ctx)) {
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_825307D0(ctx, base);
+  Gears1ProbeLeave(23);
 }
 REX_EXTERN(__imp__sub_825339A0);
 extern "C" REX_FUNC(sub_825339A0) {
   // LightPoint_NoStaticShadowing
-  Gears1ProbePolicy(33);
+  Gears1ProbePolicy(34);
   __imp__sub_825339A0(ctx, base);
 }
 REX_EXTERN(__imp__sub_82533CD8);
 extern "C" REX_FUNC(sub_82533CD8) {
   // LightPoint_ShadowTexture
-  Gears1ProbePolicy(34);
+  Gears1ProbePolicy(35);
   __imp__sub_82533CD8(ctx, base);
 }
 REX_EXTERN(__imp__sub_825340E0);
 extern "C" REX_FUNC(sub_825340E0) {
   // LightPoint_ShadowVertexBuffer
-  Gears1ProbePolicy(35);
+  Gears1ProbePolicy(36);
   __imp__sub_825340E0(ctx, base);
 }
 REX_EXTERN(__imp__sub_8253CC48);
 extern "C" REX_FUNC(sub_8253CC48) {
   // LightSpot_NoStaticShadowing
-  Gears1ProbePolicy(36);
+  Gears1ProbePolicy(37);
   __imp__sub_8253CC48(ctx, base);
 }
 REX_EXTERN(__imp__sub_8253D388);
 extern "C" REX_FUNC(sub_8253D388) {
   // LightSpot_ShadowTexture
-  Gears1ProbePolicy(37);
+  Gears1ProbePolicy(38);
   __imp__sub_8253D388(ctx, base);
 }
 REX_EXTERN(__imp__sub_8253DB28);
 extern "C" REX_FUNC(sub_8253DB28) {
   // LightSpot_ShadowVertexBuffer
-  Gears1ProbePolicy(38);
+  Gears1ProbePolicy(39);
   __imp__sub_8253DB28(ctx, base);
 }
 REX_EXTERN(__imp__sub_82544148);
 extern "C" REX_FUNC(sub_82544148) {
   // PostUber
-  if (Gears1ProbeEnter(20, ctx)) {
+  if (Gears1ProbeEnter(21, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
   __imp__sub_82544148(ctx, base);
-  Gears1ProbeLeave(20);
+  Gears1ProbeLeave(21);
 }
 REX_EXTERN(__imp__sub_8254CFA0);
 extern "C" REX_FUNC(sub_8254CFA0) {
   // FBatchedElements_Draw
-  if (Gears1ProbeEnter(24, ctx)) {
-    ctx.r3.u64 = 0;
-    return;
-  }
-  __imp__sub_8254CFA0(ctx, base);
-  Gears1ProbeLeave(24);
-}
-REX_EXTERN(__imp__sub_82553258);
-extern "C" REX_FUNC(sub_82553258) {
-  // FSceneRenderer_Render
-  if (Gears1ProbeEnter(2, ctx)) {
-    ctx.r3.u64 = 0;
-    return;
-  }
-  __imp__sub_82553258(ctx, base);
-  Gears1ProbeLeave(2);
-}
-REX_EXTERN(__imp__sub_82553EA0);
-extern "C" REX_FUNC(sub_82553EA0) {
-  // RenderPrePass
-  if (Gears1ProbeEnter(3, ctx)) {
-    ctx.r3.u64 = 0;
-    return;
-  }
-  __imp__sub_82553EA0(ctx, base);
-  Gears1ProbeLeave(3);
-}
-REX_EXTERN(__imp__sub_82554588);
-extern "C" REX_FUNC(sub_82554588) {
-  // RenderEmissive
-  if (Gears1ProbeEnter(5, ctx)) {
-    ctx.r3.u64 = 0;
-    return;
-  }
-  __imp__sub_82554588(ctx, base);
-  Gears1ProbeLeave(5);
-}
-REX_EXTERN(__imp__sub_825550A8);
-extern "C" REX_FUNC(sub_825550A8) {
-  // FDrawSceneCommand_Execute
-  if (Gears1ProbeEnter(1, ctx)) {
-    ctx.r3.u64 = 0;
-    return;
-  }
-  __imp__sub_825550A8(ctx, base);
-  Gears1ProbeLeave(1);
-}
-REX_EXTERN(__imp__sub_825A90D0);
-extern "C" REX_FUNC(sub_825A90D0) {
-  // RHICopyToResolveTarget
   if (Gears1ProbeEnter(25, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
-  __imp__sub_825A90D0(ctx, base);
+  __imp__sub_8254CFA0(ctx, base);
   Gears1ProbeLeave(25);
 }
-REX_EXTERN(__imp__sub_825A9818);
-extern "C" REX_FUNC(sub_825A9818) {
-  // RHICopyFromResolveTarget
+REX_EXTERN(__imp__sub_82553258);
+extern "C" REX_FUNC(sub_82553258) {
+  // FSceneRenderer_Render
+  if (Gears1ProbeEnter(3, ctx)) {
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_82553258(ctx, base);
+  Gears1ProbeLeave(3);
+}
+REX_EXTERN(__imp__sub_82553EA0);
+extern "C" REX_FUNC(sub_82553EA0) {
+  // RenderPrePass
+  if (Gears1ProbeEnter(4, ctx)) {
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_82553EA0(ctx, base);
+  Gears1ProbeLeave(4);
+}
+REX_EXTERN(__imp__sub_82554588);
+extern "C" REX_FUNC(sub_82554588) {
+  // RenderEmissive
+  if (Gears1ProbeEnter(6, ctx)) {
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_82554588(ctx, base);
+  Gears1ProbeLeave(6);
+}
+REX_EXTERN(__imp__sub_825550A8);
+extern "C" REX_FUNC(sub_825550A8) {
+  // FDrawSceneCommand_Execute
+  if (Gears1ProbeEnter(2, ctx)) {
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_825550A8(ctx, base);
+  Gears1ProbeLeave(2);
+}
+REX_EXTERN(__imp__sub_825A90D0);
+extern "C" REX_FUNC(sub_825A90D0) {
+  // RHICopyToResolveTarget
   if (Gears1ProbeEnter(26, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
-  __imp__sub_825A9818(ctx, base);
+  __imp__sub_825A90D0(ctx, base);
   Gears1ProbeLeave(26);
+}
+REX_EXTERN(__imp__sub_825A9818);
+extern "C" REX_FUNC(sub_825A9818) {
+  // RHICopyFromResolveTarget
+  if (Gears1ProbeEnter(27, ctx)) {
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_825A9818(ctx, base);
+  Gears1ProbeLeave(27);
 }
 REX_EXTERN(__imp__sub_825BB0A0);
 extern "C" REX_FUNC(sub_825BB0A0) {
   // ShadowDepth
-  Gears1ProbePolicy(43);
+  Gears1ProbePolicy(44);
   __imp__sub_825BB0A0(ctx, base);
 }
 REX_EXTERN(__imp__sub_825BBC40);
 extern "C" REX_FUNC(sub_825BBC40) {
   // ShadowRenderDepth
-  if (Gears1ProbeEnter(11, ctx)) {
-    ctx.r3.u64 = 0;
-    return;
-  }
-  __imp__sub_825BBC40(ctx, base);
-  Gears1ProbeLeave(11);
-}
-REX_EXTERN(__imp__sub_825BBFD8);
-extern "C" REX_FUNC(sub_825BBFD8) {
-  // ShadowRenderProjection
   if (Gears1ProbeEnter(12, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
-  __imp__sub_825BBFD8(ctx, base);
+  __imp__sub_825BBC40(ctx, base);
   Gears1ProbeLeave(12);
+}
+REX_EXTERN(__imp__sub_825BBFD8);
+extern "C" REX_FUNC(sub_825BBFD8) {
+  // ShadowRenderProjection
+  if (Gears1ProbeEnter(13, ctx)) {
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_825BBFD8(ctx, base);
+  Gears1ProbeLeave(13);
 }
 REX_EXTERN(__imp__sub_825BD9E8);
 extern "C" REX_FUNC(sub_825BD9E8) {
   // RenderProjectedShadows
-  if (Gears1ProbeEnter(10, ctx)) {
+  if (Gears1ProbeEnter(11, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
   __imp__sub_825BD9E8(ctx, base);
-  Gears1ProbeLeave(10);
+  Gears1ProbeLeave(11);
 }
 REX_EXTERN(__imp__sub_825C0468);
 extern "C" REX_FUNC(sub_825C0468) {
   // RenderShadowVolumes
-  if (Gears1ProbeEnter(8, ctx)) {
-    ctx.r3.u64 = 0;
-    return;
-  }
-  __imp__sub_825C0468(ctx, base);
-  Gears1ProbeLeave(8);
-}
-REX_EXTERN(__imp__sub_825C0A68);
-extern "C" REX_FUNC(sub_825C0A68) {
-  // RenderModulatedShadowVolumes
   if (Gears1ProbeEnter(9, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
-  __imp__sub_825C0A68(ctx, base);
+  __imp__sub_825C0468(ctx, base);
   Gears1ProbeLeave(9);
+}
+REX_EXTERN(__imp__sub_825C0A68);
+extern "C" REX_FUNC(sub_825C0A68) {
+  // RenderModulatedShadowVolumes
+  if (Gears1ProbeEnter(10, ctx)) {
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_825C0A68(ctx, base);
+  Gears1ProbeLeave(10);
 }
 REX_EXTERN(__imp__sub_825C2138);
 extern "C" REX_FUNC(sub_825C2138) {
   // RenderLights
-  if (Gears1ProbeEnter(6, ctx)) {
-    ctx.r3.u64 = 0;
-    return;
-  }
-  __imp__sub_825C2138(ctx, base);
-  Gears1ProbeLeave(6);
-}
-REX_EXTERN(__imp__sub_825C28B0);
-extern "C" REX_FUNC(sub_825C28B0) {
-  // RenderModulatedShadows
   if (Gears1ProbeEnter(7, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
-  __imp__sub_825C28B0(ctx, base);
+  __imp__sub_825C2138(ctx, base);
   Gears1ProbeLeave(7);
+}
+REX_EXTERN(__imp__sub_825C28B0);
+extern "C" REX_FUNC(sub_825C28B0) {
+  // RenderModulatedShadows
+  if (Gears1ProbeEnter(8, ctx)) {
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_825C28B0(ctx, base);
+  Gears1ProbeLeave(8);
 }
 REX_EXTERN(__imp__sub_825C3F88);
 extern "C" REX_FUNC(sub_825C3F88) {
   // DrawMesh
-  if (Gears1ProbeEnter(27, ctx)) {
+  if (Gears1ProbeEnter(28, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
   __imp__sub_825C3F88(ctx, base);
-  Gears1ProbeLeave(27);
+  Gears1ProbeLeave(28);
 }
 REX_EXTERN(__imp__sub_825CE198);
 extern "C" REX_FUNC(sub_825CE198) {
   // HitProxy
-  Gears1ProbePolicy(40);
+  Gears1ProbePolicy(41);
   __imp__sub_825CE198(ctx, base);
 }
 REX_EXTERN(__imp__sub_825CE600);
 extern "C" REX_FUNC(sub_825CE600) {
   // DepthOnly
-  Gears1ProbePolicy(39);
+  Gears1ProbePolicy(40);
   __imp__sub_825CE600(ctx, base);
 }
 REX_EXTERN(__imp__sub_825CF8D0);
 extern "C" REX_FUNC(sub_825CF8D0) {
   // Velocity
-  Gears1ProbePolicy(41);
+  Gears1ProbePolicy(42);
   __imp__sub_825CF8D0(ctx, base);
 }
 REX_EXTERN(__imp__sub_825D1268);
 extern "C" REX_FUNC(sub_825D1268) {
   // DrawEmissiveMesh
-  if (Gears1ProbeEnter(28, ctx)) {
-    ctx.r3.u64 = 0;
-    return;
-  }
-  __imp__sub_825D1268(ctx, base);
-  Gears1ProbeLeave(28);
-}
-REX_EXTERN(__imp__sub_825D3F70);
-extern "C" REX_FUNC(sub_825D3F70) {
-  // DrawTranslucentMesh
   if (Gears1ProbeEnter(29, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
-  __imp__sub_825D3F70(ctx, base);
+  __imp__sub_825D1268(ctx, base);
   Gears1ProbeLeave(29);
+}
+REX_EXTERN(__imp__sub_825D3F70);
+extern "C" REX_FUNC(sub_825D3F70) {
+  // DrawTranslucentMesh
+  if (Gears1ProbeEnter(30, ctx)) {
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_825D3F70(ctx, base);
+  Gears1ProbeLeave(30);
 }
 REX_EXTERN(__imp__sub_825D4868);
 extern "C" REX_FUNC(sub_825D4868) {
   // RenderTranslucency
-  if (Gears1ProbeEnter(17, ctx)) {
+  if (Gears1ProbeEnter(18, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
   __imp__sub_825D4868(ctx, base);
-  Gears1ProbeLeave(17);
+  Gears1ProbeLeave(18);
 }
 REX_EXTERN(__imp__sub_825D4A58);
 extern "C" REX_FUNC(sub_825D4A58) {
   // TranslucentBlend
-  Gears1ProbePolicy(44);
+  Gears1ProbePolicy(45);
   __imp__sub_825D4A58(ctx, base);
 }
 REX_EXTERN(__imp__sub_825D4B30);
 extern "C" REX_FUNC(sub_825D4B30) {
   // TranslucentAdditive
-  Gears1ProbePolicy(45);
+  Gears1ProbePolicy(46);
   __imp__sub_825D4B30(ctx, base);
 }
 REX_EXTERN(__imp__sub_825D4C80);
 extern "C" REX_FUNC(sub_825D4C80) {
   // TranslucentModulate
-  Gears1ProbePolicy(46);
+  Gears1ProbePolicy(47);
   __imp__sub_825D4C80(ctx, base);
 }
 REX_EXTERN(__imp__sub_825D6E08);
 extern "C" REX_FUNC(sub_825D6E08) {
   // DrawDistortionApplyScreen
-  if (Gears1ProbeEnter(16, ctx)) {
+  if (Gears1ProbeEnter(17, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
   __imp__sub_825D6E08(ctx, base);
-  Gears1ProbeLeave(16);
+  Gears1ProbeLeave(17);
 }
 REX_EXTERN(__imp__sub_825D7438);
 extern "C" REX_FUNC(sub_825D7438) {
   // RenderDistortion
-  if (Gears1ProbeEnter(15, ctx)) {
+  if (Gears1ProbeEnter(16, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
   __imp__sub_825D7438(ctx, base);
-  Gears1ProbeLeave(15);
+  Gears1ProbeLeave(16);
 }
 REX_EXTERN(__imp__sub_825D8408);
 extern "C" REX_FUNC(sub_825D8408) {
   // DistortionMesh
-  Gears1ProbePolicy(42);
+  Gears1ProbePolicy(43);
   __imp__sub_825D8408(ctx, base);
 }
 REX_EXTERN(__imp__sub_825D94A0);
 extern "C" REX_FUNC(sub_825D94A0) {
   // RenderFog
-  if (Gears1ProbeEnter(14, ctx)) {
+  if (Gears1ProbeEnter(15, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
   __imp__sub_825D94A0(ctx, base);
-  Gears1ProbeLeave(14);
+  Gears1ProbeLeave(15);
 }
 REX_EXTERN(__imp__sub_825D9F78);
 extern "C" REX_FUNC(sub_825D9F78) {
   // RenderGammaCorrection
-  if (Gears1ProbeEnter(18, ctx)) {
+  if (Gears1ProbeEnter(19, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
   __imp__sub_825D9F78(ctx, base);
-  Gears1ProbeLeave(18);
+  Gears1ProbeLeave(19);
 }
 REX_EXTERN(__imp__sub_825E2680);
 extern "C" REX_FUNC(sub_825E2680) {
   // RenderLightFunction
-  if (Gears1ProbeEnter(13, ctx)) {
+  if (Gears1ProbeEnter(14, ctx)) {
     ctx.r3.u64 = 0;
     return;
   }
   __imp__sub_825E2680(ctx, base);
-  Gears1ProbeLeave(13);
+  Gears1ProbeLeave(14);
 }

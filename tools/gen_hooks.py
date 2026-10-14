@@ -155,7 +155,7 @@ for address in sorted(set(observed) | set(probes)):
         body.append(f'  // {name}')
         body += [f'  {f}(ctx, base);' for f in extra.get('pre', [])]
         if extra.get('post'):
-            body.append('  const Gears1HookEntry entry{ctx.r3.u32, ctx.r5.u32};')
+            body.append('  const Gears1HookEntry entry{ctx.r3.u32, ctx.r4.u32, ctx.r5.u32};')
             after += [f'  {f}(entry, ctx, base);' for f in extra['post']]
         if kind in ('pass', 'scope'):
             body.append(f'  if (Gears1ProbeEnter({pid}, ctx)) {{')

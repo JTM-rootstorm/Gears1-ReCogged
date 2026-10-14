@@ -1413,3 +1413,14 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   are valid (they read zero-initialised VS outputs where the runtime's
   narrower pair mask used constant zeros). --native-variants: 12 shaders,
   24 modules with param gen; still 34,166 modules, all valid.
+- NATIVE RENDERER SKELETON (2026-10-14, src/native_renderer.cpp,
+  gears1_native_renderer, default off): post hooks on D3D device init
+  (8223A840) and Swap; the main thread opens an SDL_GPU window at the
+  guest back buffer size, then clears it (cycling colour) and draws an
+  ImGui overlay (device, back buffer, guest/presented frames, frame time)
+  once per guest frame, skipping when the previous present is still
+  queued. ImGui core = the runtime's exported 1.92.5 in our own context;
+  SDL_GPU backend vendored in third_party/imgui. 45 s run: Vulkan window
+  1280x720 (from the game's present parameters), no errors; the emulated
+  window keeps running the game (detached mode would hang: D3D waits on
+  the GPU consuming its PM4).

@@ -21,7 +21,12 @@ extra keys:
 PROBES = [
     # Frame boundary: D3D Swap (one call per presented frame; also ends the
     # gears1_d3d_observe line)
-    (0x8223E860, 'Swap', 'frame', {}),
+    (0x8223E860, 'Swap', 'frame', {'post': ['Gears1NativeRendererFrame']}),
+
+    # D3D device init (r3 device, r4 present parameters): the only D3D
+    # function calling VdInitializeEngines; called by UE3's back buffer setup
+    # 824A4D48. Native renderer (src/native_renderer.cpp).
+    (0x8223A840, 'DeviceInit', 'hook', {'post': ['Gears1NativeRendererDeviceInit']}),
 
     # Scene renderer (NATIVE_RENDERER.md "Scene renderer map")
     (0x825550A8, 'FDrawSceneCommand_Execute', 'pass', {}),

@@ -16,8 +16,10 @@ set(GEARS1RECOMP_SOURCES
     src/hooks_gen.cpp
     src/mouse_look.cpp
     src/native_input.cpp
+    src/native_renderer.cpp
     src/probes.cpp
     src/shader_dump.cpp
+    third_party/imgui/imgui_impl_sdlgpu3.cpp
 )
 
 if(WIN32)
@@ -27,6 +29,7 @@ else()
 endif()
 
 rexglue_setup_target(gears1_recomp GPU_PLUGINS xenos)
+target_include_directories(gears1_recomp PRIVATE third_party/imgui)
 
 # Optional patched xenos plugin (e.g. built from the SDK source tree). Copied
 # after the stock plugin that rexglue_setup_target stages, so it wins.
