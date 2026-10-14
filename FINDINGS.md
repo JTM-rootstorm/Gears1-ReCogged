@@ -1340,7 +1340,7 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   fetch formats dynamic).
 - OFFLINE == RUNTIME TRANSLATION (2026-10-14): ran the game once with a
   plugin that dumps the Vulkan backend's translated SPIR-V (dump_shaders;
-  SDK local/shader-tools 377fa21, Vulkan had no Translation::Dump call) from
+  SDK local/shader-tools tip, Vulkan had no Translation::Dump call) from
   a separate run folder (gears1_captures/dumprun, hard-linked exe + that
   plugin). At startup it translated the pipeline storage (1,834 pipelines):
   1,388 translations of 839 shaders. tools/compare_shader_translations.py
