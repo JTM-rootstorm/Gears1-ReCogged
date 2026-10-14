@@ -1321,3 +1321,20 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   microcode in place for the vertex declaration at bind time) and 1 PS.
   => The full shader set can be translated offline (AOT), no runtime
   translation needed; VS fetch patching must be handled by the translator.
+- OFFLINE SHADER TRANSLATION (2026-10-14): tools/upk.py --extract-shaders
+  wrote the 18,595 shaders of the packages' shader caches (15 s) to
+  gears1_captures/shader_cache; tools/translate_shaders.py ran
+  rexgpu-shader-tool (gears1-main translator + the tool commit, built in a
+  temporary worktree) on all of them: 18,595/18,595 translate and pass
+  spirv-val (Vulkan 1.2 with --uniform-buffer-standard-layout
+  --scalar-block-layout, the layout features the runtime's device enables;
+  without them every module fails the Block layout rule). 15 s with 10 jobs.
+  858.7 MB of SPIR-V (avg 46 KB, unoptimised); on a 60-module sample
+  spirv-opt -O saves 26%, zstd -19 leaves 13%. Metal: SPIRV-Cross
+  (tools_ext) converts 300/300 sampled modules at MSL 2.3 (256/300 at MSL
+  2.1: demote-to-helper needs 2.3). Caveats: valid is not correct (no
+  rendering check yet); only the default shader modification per shader
+  (state-dependent variants not generated); vertex shaders are the
+  unpatched originals (D3D patches their vfetch at bind time for the vertex
+  declaration, so a native renderer must translate per declaration or make
+  fetch formats dynamic).

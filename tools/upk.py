@@ -5,9 +5,14 @@ tables, LZO-compressed chunks (package compression flag 2) and whole-file
 compressed packages (script/localisation packages; little-endian chunk
 header, LZO blocks). Needs liblzo2 (dev-time only, loaded with ctypes).
 
-Usage: tools/upk.py <package.xxx>   (export classes and shader caches)
+Usage:
+  tools/upk.py <package.xxx>                    export classes, shader caches
+  tools/upk.py --extract-shaders <dir> <packages...>
+      write every distinct shader container found in the packages' shader
+      caches to <dir>/<vs|ps>_<sha1 prefix>.bin (same layout as the shader
+      dump: header followed by microcode), plus <dir>/index.txt
 """
-import ctypes, struct, sys
+import ctypes, hashlib, os, re, struct, sys
 
 _lzo = ctypes.CDLL('liblzo2.so.2')
 _lzo.__lzo_init_v2.restype = ctypes.c_int
@@ -121,7 +126,44 @@ class Package:
         if i > 0: return self.exports[i - 1][1] if i - 1 < len(self.exports) else f'export{i}'
         return 'Class'
 
+# Xenos shader container: flags 0x102A11xx (bit 0 = vertex shader), header
+# size, microcode size; the microcode follows the header.
+SHADER_MAGIC = re.compile(rb'\x10\x2a\x11[\x00-\xff]')
+
+def shader_containers(data):
+    """Yields (is_vertex, container bytes) for each container in data."""
+    for m in SHADER_MAGIC.finditer(data):
+        o = m.start()
+        if o + 12 > len(data):
+            continue
+        flags, header_size, microcode_size = struct.unpack_from('>3I', data, o)
+        if (12 <= header_size <= 0x10000 and 0 < microcode_size <= 0x40000 and
+                o + header_size + microcode_size <= len(data)):
+            yield bool(flags & 1), data[o:o + header_size + microcode_size]
+
+def extract_shaders(out_dir, paths):
+    os.makedirs(out_dir, exist_ok=True)
+    seen = {}
+    for path in paths:
+        package = Package(path)
+        for cls, _, size, offset in package.exports:
+            if cls != 'ShaderCache':
+                continue
+            for is_vertex, blob in shader_containers(package.data[offset:offset + size]):
+                key = hashlib.sha1(blob).hexdigest()[:16]
+                if key not in seen:
+                    seen[key] = ('vs' if is_vertex else 'ps', len(blob), os.path.basename(path))
+                    with open(os.path.join(out_dir, f'{seen[key][0]}_{key}.bin'), 'wb') as f:
+                        f.write(blob)
+    with open(os.path.join(out_dir, 'index.txt'), 'w') as f:
+        for key, (kind, size, package) in sorted(seen.items()):
+            f.write(f'{kind} {key} size={size} first_package={package}\n')
+    print(f'{len(seen)} shaders -> {out_dir}')
+
 if __name__ == '__main__':
+    if sys.argv[1] == '--extract-shaders':
+        extract_shaders(sys.argv[2], sys.argv[3:])
+        sys.exit(0)
     p = Package(sys.argv[1])
     print(f'version {p.version} engine {p.engine} compression {p.compression} names {len(p.names)} '
           f'imports {len(p.imports)} exports {len(p.exports)} image {len(p.data):#x}')
