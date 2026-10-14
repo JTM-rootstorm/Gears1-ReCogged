@@ -1435,3 +1435,14 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   R8/R8G8/R8G8B8A8/BC1-5/RGBA16F/R32F; the main thread uploads and the
   overlay shows a paged browser (guest channel order, no swizzle) with
   counts per unsupported reason.
+- NATIVE TEXTURE MIPS (2026-10-14): every level is decoded with the
+  runtime's GetGuestTextureLayout (row pitch per level, mip offsets from the
+  mip address) and GetPackedMipOffset (block offset inside the packed tail
+  for levels >= packed_level; this includes the base level of textures of
+  16 texels or less, which the first cut decoded from the wrong place).
+  Level sizes are base >> level; the SDL_GPU texture gets all levels
+  (missing base: levels from mip_min). Array slices of stacked textures
+  beyond the first are not uploaded yet. The browser's thumbnails sample
+  the mips (ImGui's sampler: linear mips, full LOD range), and clicking one
+  opens every level at its own size; the overlay now gets mouse input from
+  an SDL event watch on the native window.

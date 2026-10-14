@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -57,6 +58,43 @@ class ImGuiScope {
   ImGuiContext* previous_;
 };
 
+// Mouse input for the overlay, from events on the native window (delivered
+// on the main thread, which also draws the overlay).
+bool OnEvent(void*, SDL_Event* event) {
+  if (!g_imgui || !g_window) {
+    return true;
+  }
+  const SDL_WindowID window = SDL_GetWindowID(g_window);
+  ImGuiScope scope;
+  ImGuiIO& io = ImGui::GetIO();
+  switch (event->type) {
+    case SDL_EVENT_MOUSE_MOTION:
+      if (event->motion.windowID == window) {
+        io.AddMousePosEvent(event->motion.x, event->motion.y);
+      }
+      break;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+      if (event->button.windowID == window) {
+        // ImGui: 0 left, 1 right, 2 middle; SDL: 1 left, 2 middle, 3 right.
+        constexpr int kImGuiButton[] = {-1, 0, 2, 1, 3, 4};
+        const uint8_t button = event->button.button;
+        if (button < std::size(kImGuiButton) && kImGuiButton[button] >= 0) {
+          io.AddMouseButtonEvent(kImGuiButton[button], event->button.down);
+        }
+      }
+      break;
+    case SDL_EVENT_MOUSE_WHEEL:
+      if (event->wheel.windowID == window) {
+        io.AddMouseWheelEvent(event->wheel.x, event->wheel.y);
+      }
+      break;
+    default:
+      break;
+  }
+  return true;
+}
+
 void Create(void*) {
   const int width = int(g_back_buffer_width.load()), height = int(g_back_buffer_height.load());
   g_window = SDL_CreateWindow("Gears of War - native renderer", width ? width : 1280,
@@ -74,6 +112,7 @@ void Create(void*) {
   init.Device = g_device;
   init.ColorTargetFormat = SDL_GetGPUSwapchainTextureFormat(g_device, g_window);
   ImGui_ImplSDLGPU3_Init(&init);
+  SDL_AddEventWatch(OnEvent, nullptr);
   REXLOG_INFO("Native renderer: {} window {}x{}", SDL_GetGPUDeviceDriver(g_device), width, height);
 }
 

@@ -4,9 +4,11 @@
 // binds it (pre hook, tools/hook_table.py): its GPU fetch constant (six
 // dwords at +0x1C of the texture object, which SetTexture merges into the
 // device's sampler state) gives the format, size, tiling, endianness and
-// physical address. The base level is untiled and byte-swapped with the
-// runtime's texture helpers (rex::graphics::texture_util / _conversion),
-// then uploaded on the main thread. Channels stay as the guest stores them;
+// physical address. Every level (base at the base address, mips at the mip
+// address, the smallest levels together in the packed mip tail) is untiled
+// and byte-swapped with the runtime's texture helpers
+// (rex::graphics::texture_util / _conversion), then uploaded on the main
+// thread. Channels stay as the guest stores them;
 // the fetch constant's swizzle is applied when sampling (phase 3).
 
 #include <algorithm>
@@ -72,18 +74,26 @@ SDL_GPUTextureFormat HostFormat(TextureFormat format) {
   }
 }
 
+struct DecodedLevel {
+  uint32_t width, height;     // texels
+  uint32_t row_texels, rows;  // upload layout: whole blocks
+  size_t offset;              // in DecodedTexture::data
+};
+
 struct DecodedTexture {
   uint32_t address;
-  uint32_t width, height;  // texels
-  uint32_t row_texels, rows;  // upload layout: whole blocks
+  uint32_t width, height;  // base level, texels
   TextureFormat guest_format;
   SDL_GPUTextureFormat host_format;
+  // Levels mip_min_level..; the texture has levels.size() + first_level.
+  uint32_t first_level;
+  std::vector<DecodedLevel> levels;
   std::vector<uint8_t> data;
 };
 
 struct HostTexture {
   uint32_t address;
-  uint32_t width, height;
+  uint32_t width, height, level_count;
   TextureFormat guest_format;
   SDL_GPUTexture* texture;
 };
@@ -115,43 +125,64 @@ bool Decode(const xe_gpu_texture_fetch_t& fetch, uint8_t* base, DecodedTexture& 
   texture_util::GetSubresourcesFromFetchConstant(fetch, &width_minus_1, &height_minus_1,
                                                  &depth_minus_1, &base_page, &mip_page, &mip_min,
                                                  &mip_max);
-  if (!base_page) {
-    reason = "no base level";
-    return false;
-  }
   out.address = base_page << 12;
   out.width = width_minus_1 + 1;
   out.height = height_minus_1 + 1;
-  const uint32_t blocks_x = (out.width + info->block_width - 1) / info->block_width;
-  const uint32_t blocks_y = (out.height + info->block_height - 1) / info->block_height;
-  const uint32_t block_bytes = info->bytes_per_block();
-  out.row_texels = blocks_x * info->block_width;
-  out.rows = blocks_y * info->block_height;
-  out.data.resize(size_t(blocks_x) * blocks_y * block_bytes);
-  const uint8_t* source = rex::memory::GuestPtr(base, kPhysicalMirror | out.address);
   const xenos::Endian endian = fetch.endianness;
-  // The fetch constant's pitch is in 32-texel units.
-  const uint32_t pitch_blocks = fetch.pitch * 32 / info->block_width;
-  if (fetch.tiled) {
-    texture_conversion::UntileInfo untile = {};
-    untile.width = blocks_x;
-    untile.height = blocks_y;
-    untile.input_pitch = pitch_blocks;
-    untile.output_pitch = blocks_x;
-    untile.input_format_info = info;
-    untile.output_format_info = info;
-    untile.copy_callback = [endian](void* output, const void* input, size_t length) {
-      texture_conversion::CopySwapBlock(endian, output, input, length);
-    };
-    texture_conversion::Untile(out.data.data(), source, &untile);
-  } else {
-    const uint32_t row_bytes = blocks_x * block_bytes;
-    const uint32_t source_row_bytes = rex::align(pitch_blocks * block_bytes,
-                                                 xenos::kTextureLinearRowAlignmentBytes);
-    for (uint32_t y = 0; y < blocks_y; ++y) {
-      texture_conversion::CopySwapBlock(endian, out.data.data() + size_t(y) * row_bytes,
-                                        source + size_t(y) * source_row_bytes, row_bytes);
+  const texture_util::TextureGuestLayout layout = texture_util::GetGuestTextureLayout(
+      fetch.dimension, fetch.pitch, out.width, out.height, depth_minus_1 + 1, fetch.tiled,
+      fetch.format, fetch.packed_mips, base_page != 0, mip_max);
+  const uint32_t block_bytes = info->bytes_per_block();
+  out.first_level = base_page ? 0 : mip_min;
+  for (uint32_t level = out.first_level; level <= mip_max; ++level) {
+    const uint32_t stored = std::min(level, layout.packed_level);
+    const texture_util::TextureGuestLayout::Level& guest_level =
+        level ? layout.mips[stored] : layout.base;
+    uint32_t address = level ? (mip_page << 12) + layout.mip_offsets_bytes[stored] : out.address;
+    if (!address) {
+      reason = "no level " + std::to_string(level);
+      return false;
     }
+    uint32_t offset_x = 0, offset_y = 0, offset_z = 0;
+    if (level >= layout.packed_level) {
+      texture_util::GetPackedMipOffset(out.width, out.height, depth_minus_1 + 1, fetch.format,
+                                       level, offset_x, offset_y, offset_z);
+    }
+    DecodedLevel decoded;
+    decoded.width = std::max(out.width >> level, 1u);
+    decoded.height = std::max(out.height >> level, 1u);
+    const uint32_t blocks_x = (decoded.width + info->block_width - 1) / info->block_width;
+    const uint32_t blocks_y = (decoded.height + info->block_height - 1) / info->block_height;
+    decoded.row_texels = blocks_x * info->block_width;
+    decoded.rows = blocks_y * info->block_height;
+    decoded.offset = out.data.size();
+    out.data.resize(out.data.size() + size_t(blocks_x) * blocks_y * block_bytes);
+    uint8_t* destination = out.data.data() + decoded.offset;
+    const uint8_t* source = rex::memory::GuestPtr(base, kPhysicalMirror | address);
+    if (fetch.tiled) {
+      texture_conversion::UntileInfo untile = {};
+      untile.offset_x = offset_x;
+      untile.offset_y = offset_y;
+      untile.width = blocks_x;
+      untile.height = blocks_y;
+      untile.input_pitch = guest_level.row_pitch_bytes / block_bytes;
+      untile.output_pitch = blocks_x;
+      untile.input_format_info = info;
+      untile.output_format_info = info;
+      untile.copy_callback = [endian](void* output, const void* input, size_t length) {
+        texture_conversion::CopySwapBlock(endian, output, input, length);
+      };
+      texture_conversion::Untile(destination, source, &untile);
+    } else {
+      const uint32_t row_bytes = blocks_x * block_bytes;
+      source += size_t(offset_y) * guest_level.row_pitch_bytes + size_t(offset_x) * block_bytes;
+      for (uint32_t y = 0; y < blocks_y; ++y) {
+        texture_conversion::CopySwapBlock(endian, destination + size_t(y) * row_bytes,
+                                          source + size_t(y) * guest_level.row_pitch_bytes,
+                                          row_bytes);
+      }
+    }
+    out.levels.push_back(decoded);
   }
   return true;
 }
@@ -222,7 +253,7 @@ void NativeTexturesUpload(SDL_GPUDevice* device, SDL_GPUCommandBuffer* command_b
     create_info.width = texture.width;
     create_info.height = texture.height;
     create_info.layer_count_or_depth = 1;
-    create_info.num_levels = 1;
+    create_info.num_levels = texture.first_level + uint32_t(texture.levels.size());
     SDL_GPUTexture* host = SDL_CreateGPUTexture(device, &create_info);
     if (!host) {
       REXLOG_WARN("Native textures: {}x{} format {} not created: {}", texture.width,
@@ -230,19 +261,24 @@ void NativeTexturesUpload(SDL_GPUDevice* device, SDL_GPUCommandBuffer* command_b
       continue;
     }
     std::memcpy(mapped + offset, texture.data.data(), texture.data.size());
-    SDL_GPUTextureTransferInfo source = {};
-    source.transfer_buffer = transfer;
-    source.offset = offset;
-    source.pixels_per_row = texture.row_texels;
-    source.rows_per_layer = texture.rows;
-    SDL_GPUTextureRegion destination = {};
-    destination.texture = host;
-    destination.w = texture.width;
-    destination.h = texture.height;
-    destination.d = 1;
-    SDL_UploadToGPUTexture(copy_pass, &source, &destination, false);
+    for (size_t i = 0; i < texture.levels.size(); ++i) {
+      const DecodedLevel& level = texture.levels[i];
+      SDL_GPUTextureTransferInfo source = {};
+      source.transfer_buffer = transfer;
+      source.offset = offset + uint32_t(level.offset);
+      source.pixels_per_row = level.row_texels;
+      source.rows_per_layer = level.rows;
+      SDL_GPUTextureRegion destination = {};
+      destination.texture = host;
+      destination.mip_level = texture.first_level + uint32_t(i);
+      destination.w = level.width;
+      destination.h = level.height;
+      destination.d = 1;
+      SDL_UploadToGPUTexture(copy_pass, &source, &destination, false);
+    }
     offset += uint32_t(texture.data.size());
-    g_textures.push_back({texture.address, texture.width, texture.height, texture.guest_format, host});
+    g_textures.push_back({texture.address, texture.width, texture.height,
+                          create_info.num_levels, texture.guest_format, host});
   }
   SDL_EndGPUCopyPass(copy_pass);
   SDL_UnmapGPUTransferBuffer(device, transfer);
@@ -251,10 +287,11 @@ void NativeTexturesUpload(SDL_GPUDevice* device, SDL_GPUCommandBuffer* command_b
 
 void NativeTexturesDrawBrowser() {
   static int page = 0;
+  static int selected = -1;
   constexpr int kPerPage = 48;
   ImGui::SetNextWindowPos(ImVec2(10.0f, 120.0f), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(820.0f, 560.0f), ImGuiCond_FirstUseEver);
-  ImGui::Begin("Textures (base level, guest channel order)");
+  ImGui::Begin("Textures (guest channel order)");
   {
     std::lock_guard<std::mutex> lock(g_mutex);
     ImGui::Text("Decoded %u, uploaded %zu", g_decoded, g_textures.size());
@@ -272,11 +309,36 @@ void NativeTexturesDrawBrowser() {
     if ((i - page * kPerPage) % 8) {
       ImGui::SameLine();
     }
-    ImGui::Image(ImTextureRef(ImTextureID(texture.texture)), ImVec2(92.0f, 92.0f));
+    ImGui::PushID(i);
+    if (ImGui::ImageButton("texture", ImTextureRef(ImTextureID(texture.texture)),
+                           ImVec2(92.0f, 92.0f))) {
+      selected = i;
+    }
+    ImGui::PopID();
     if (ImGui::IsItemHovered()) {
-      ImGui::SetTooltip("%08X  %ux%u  format %u", texture.address, texture.width, texture.height,
-                        uint32_t(texture.guest_format));
+      ImGui::SetTooltip("%08X  %ux%u  %u levels  format %u", texture.address, texture.width,
+                        texture.height, texture.level_count, uint32_t(texture.guest_format));
     }
   }
   ImGui::End();
+
+  // Each level drawn at its own size samples that level.
+  if (selected >= 0 && selected < int(g_textures.size())) {
+    const HostTexture& texture = g_textures[selected];
+    bool open = true;
+    ImGui::SetNextWindowSize(ImVec2(560.0f, 600.0f), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Mip levels", &open, ImGuiWindowFlags_HorizontalScrollbar);
+    ImGui::Text("%08X  %ux%u  format %u", texture.address, texture.width, texture.height,
+                uint32_t(texture.guest_format));
+    for (uint32_t level = 0; level < texture.level_count; ++level) {
+      const float width = float(std::max(texture.width >> level, 1u));
+      const float height = float(std::max(texture.height >> level, 1u));
+      ImGui::Text("Level %u: %.0fx%.0f", level, width, height);
+      ImGui::Image(ImTextureRef(ImTextureID(texture.texture)), ImVec2(width, height));
+    }
+    ImGui::End();
+    if (!open) {
+      selected = -1;
+    }
+  }
 }
