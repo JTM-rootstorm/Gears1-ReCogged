@@ -332,5 +332,28 @@ destined for Canary (no XDK-derived information).
   (on float depth it shrinks at low depths, the blood-pool problem). Plan:
   shader-side depth offset for UE3's decal draws, skip the occlusion query
   pass (draw everything). Once Gears owns its SDL build (no ReXGlue), a small
-  SDL patch or an upstream SDL feature is the fallback. Still to check
-  before the skeleton phase: MSAA resolve and depth formats.
+  SDL patch or an upstream SDL feature is the fallback.
+- MSAA resolve and depth formats in SDL_GPU (checked 2026-10-14, SDL 3.5
+  header + a query program on the RTX 4080 / NVIDIA 615.78.08, Vulkan):
+  - Colour resolve: only as a render pass store op (RESOLVE /
+    RESOLVE_AND_STORE) into a 1x texture's mip/layer at the end of the pass.
+    Xbox Resolve to a sub-rectangle or offset = resolve, then
+    SDL_CopyGPUTextureToTexture / SDL_BlitGPUTexture for the region.
+  - Depth/stencil resolve: not supported ("depth/stencil targets do not
+    support multisample resolves"). UE3's sample-0 depth resolve needs either
+    1x rendering (GTilingMode 4, what gears1_black_shading_fix already
+    selects, has no 2x MSAA) or a shader that reads sample 0 and writes depth.
+    SDL accepts creating 2x MSAA colour and depth (D24S8, D32FS8) textures
+    with SAMPLER usage on this GPU; reading them in a shader (texelFetch on a
+    multisampled texture) is undocumented and untested. Plan: 1x for
+    bring-up, MSAA (or post AA) later.
+  - Depth formats: SDL guarantees only D16 plus either D24 or D32F, and
+    either D24S8 or D32FS8, so query SDL_GPUTextureSupportsFormat. This GPU
+    has all five, at 1x/2x/4x/8x and with SAMPLER usage. Gears needs stencil
+    (shadow volumes): D24_UNORM_S8 where available gives depth bias in
+    constant units (no decal Z-fighting, no shader offset needed); where only
+    D32_FLOAT_S8 exists (Apple GPUs have no D24S8) use the shader-side decal
+    offset.
+  - Colour formats Gears needs that exist: R10G10B10A2_UNORM (2_10_10_10),
+    R16G16B16A16_FLOAT (for 7e3 / 2_10_10_10_FLOAT), BC1-3 (DXT), sRGB 8888.
+    No PWL gamma or 7e3 format: convert in shaders as ReXGlue does.
