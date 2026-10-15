@@ -14,8 +14,10 @@
 // - each element's vertex fetch constant in the fetch constant shadow (with
 //   SetStreamSource's offset applied).
 // Buffers are byte-swapped by their endianness and uploaded when first drawn,
-// then again whenever their contents change (hashed at most once per guest
-// frame), and released after a while unused. The game's 8_8_8_8 integer
+// then again whenever their contents change, and released after a while
+// unused. Changes are found with the runtime's physical memory write watches
+// (as the emulated GPU's shared memory finds them): a buffer is re-read, and
+// re-uploaded if its hash changed, only after a write to one of its pages. The game's 8_8_8_8 integer
 // elements have no SDL_GPU format the translated shaders can read as float (no
 // USCALED), so each gets a float4 copy in a buffer of its own. Vertex inputs are
 // at the locations rexgpu-shader-tool --host-vertex-input gives each usage.
@@ -25,14 +27,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <map>
 #include <mutex>
-#include <set>
 #include <string>
-#include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -47,6 +49,8 @@
 #include <rex/logging/macros.h>
 #include <rex/memory/utils.h>
 #include <rex/ppc.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/xmemory.h>
 
 #include "mesh_preview.frag.h"
 #include "mesh_preview.vert.h"
@@ -78,6 +82,7 @@ constexpr uint32_t kVertexShaderMicrocode = 32;
 // Physical memory is mirrored at 0xA0000000 in the guest address space.
 constexpr uint32_t kPhysicalMirror = 0xA0000000;
 constexpr uint32_t kPhysicalSize = 0x20000000;
+constexpr uint32_t kPageSizeLog2 = 12;  // host pages, the write watch granularity
 // Host buffers unused for this many guest frames are released.
 constexpr uint64_t kEvictFrames = 300;
 
@@ -152,6 +157,7 @@ struct IndexRange {
 
 struct BufferState {
   uint64_t checked_frame = UINT64_MAX;
+  uint32_t read_serial = 0;  // g_write_serial when last read
   uint64_t hash = 0;
   uint32_t version = 0;  // bumped whenever the contents change
 };
@@ -170,20 +176,36 @@ struct Upload {
 struct FrameStats {
   uint32_t draws = 0;
   uint64_t capture_ns = 0;
+  uint64_t hash_ns = 0, hash_bytes = 0;  // re-reading written buffers
   uint64_t upload_bytes = 0;
   uint32_t uploads = 0;
   std::map<std::string, uint32_t> problems;  // reason -> draws
-  std::map<uint32_t, uint32_t> primitives;   // Xenos primitive type -> draws
+  std::array<uint32_t, 64> primitives = {};  // draws per Xenos primitive type
 };
+
+// Write watches. The runtime calls OnPhysicalWrite on the first write to a
+// watched page, on the writing thread and under its global lock (so it takes
+// no locks of ours), then unprotects the pages: each write stamps its pages
+// with a new serial.
+std::atomic<uint32_t> g_write_serial{0};
+std::atomic<uint32_t> g_page_serials[kPhysicalSize >> kPageSizeLog2];
 
 std::mutex g_mutex;
 uint8_t* g_base = nullptr;
+void* g_watch_handle = nullptr;
 // Guest thread (draw hook and frame end), under g_mutex.
 uint64_t g_frame = 0;
-std::map<BufferKey, BufferState> g_states;  // guest buffers
-std::map<BufferKey, HostState> g_hosts;     // host buffers queued
-std::map<std::tuple<BufferKey, uint32_t, uint32_t, uint32_t>, IndexRange> g_ranges;
-std::set<std::tuple<uint32_t, bool, bool>> g_formats;  // fetch formats seen
+std::unordered_map<BufferKey, BufferState, rex::XXHasher<BufferKey>> g_states;  // guest
+std::unordered_map<BufferKey, HostState, rex::XXHasher<BufferKey>> g_hosts;  // host, queued
+// Index range of each drawn range of an index buffer version.
+struct RangeKey {
+  BufferKey buffer;
+  uint32_t version, start_index, index_count;
+  bool operator==(const RangeKey&) const = default;
+};
+std::unordered_map<RangeKey, IndexRange, rex::XXHasher<RangeKey>> g_ranges;
+// Fetch formats seen: format | signed << 6 | integer << 7.
+std::array<bool, 256> g_formats = {};
 std::vector<DrawRecord> g_draws;
 FrameStats g_stats;
 // Published at the end of each guest frame, under g_mutex.
@@ -219,17 +241,60 @@ uint32_t InputLocation(uint32_t usage, uint32_t usage_index) {
   return UINT32_MAX;
 }
 
+std::pair<uint32_t, uint32_t> OnPhysicalWrite(void*, uint32_t address, uint32_t length,
+                                              bool exact_range) {
+  if (!length || address >= kPhysicalSize) {
+    return {0, UINT32_MAX};
+  }
+  length = std::min(length, kPhysicalSize - address);
+  uint32_t page_first = address >> kPageSizeLog2;
+  uint32_t page_last = (address + length - 1) >> kPageSizeLog2;
+  // Like the emulated GPU, let a write unprotect up to 256 KB around it (far
+  // fewer faults), all of which counts as written.
+  if (!exact_range) {
+    page_first &= ~63u;
+    page_last |= 63u;
+  }
+  const uint32_t serial = g_write_serial.fetch_add(1, std::memory_order_relaxed) + 1;
+  for (uint32_t page = page_first; page <= page_last; ++page) {
+    g_page_serials[page].store(serial, std::memory_order_relaxed);
+  }
+  return {page_first << kPageSizeLog2, (page_last - page_first + 1) << kPageSizeLog2};
+}
+
+bool WrittenSince(const BufferKey& key, uint32_t serial) {
+  const uint32_t page_last = (key.address + key.size - 1) >> kPageSizeLog2;
+  for (uint32_t page = key.address >> kPageSizeLog2; page <= page_last; ++page) {
+    if (g_page_serials[page].load(std::memory_order_relaxed) > serial) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // The guest buffer's version, bumped when it is new or its contents changed
-// (hashed at most once per guest frame).
+// (checked at most once per guest frame).
 uint32_t Check(const BufferKey& key) {
   BufferState& state = g_states[key];
-  if (state.checked_frame != g_frame) {
-    state.checked_frame = g_frame;
-    const uint64_t hash = XXH3_64bits(GuestPhysical(key.address), key.size);
-    if (!state.version || hash != state.hash) {
-      state.hash = hash;
-      ++state.version;
-    }
+  if (state.checked_frame == g_frame) {
+    return state.version;
+  }
+  state.checked_frame = g_frame;
+  if (state.version && !WrittenSince(key, state.read_serial)) {
+    return state.version;
+  }
+  // Watch the pages again (a write unprotected them), then read: a write from
+  // here on is either read now or seen next time.
+  state.read_serial = g_write_serial.load(std::memory_order_relaxed);
+  rex::system::kernel_state()->memory()->EnablePhysicalMemoryAccessCallbacks(key.address,
+                                                                            key.size, true, false);
+  const uint64_t hash_start_ns = SDL_GetTicksNS();
+  const uint64_t hash = XXH3_64bits(GuestPhysical(key.address), key.size);
+  g_stats.hash_ns += SDL_GetTicksNS() - hash_start_ns;
+  g_stats.hash_bytes += key.size;
+  if (!state.version || hash != state.hash) {
+    state.hash = hash;
+    ++state.version;
   }
   return state.version;
 }
@@ -321,7 +386,7 @@ void CaptureIndices(const uint8_t* device, DrawRecord& draw) {
     g_ranges.clear();
   }
   auto [it, inserted] = g_ranges.try_emplace(
-      {draw.index_buffer, version, draw.start_index, draw.index_count});
+      RangeKey{draw.index_buffer, version, draw.start_index, draw.index_count});
   if (inserted) {
     it->second = ScanIndices(draw, endian, reset_index);
   }
@@ -389,7 +454,9 @@ void CaptureVertices(const uint8_t* device, DrawRecord& draw) {
     const uint32_t offset = uint32_t(fetch_instruction.offset()) * 4;
     const bool is_signed = fetch_instruction.is_signed();
     const bool integer = !fetch_instruction.is_normalized();
-    if (g_formats.insert({uint32_t(format), is_signed, integer}).second) {
+    bool& seen = g_formats[uint32_t(format) | uint32_t(is_signed) << 6 | uint32_t(integer) << 7];
+    if (!seen) {
+      seen = true;
       REXLOG_INFO("Native buffers: vertex fetch format {} (signed {}, integer {})",
                   uint32_t(format), is_signed, integer);
     }
@@ -749,12 +816,17 @@ void Gears1NativeBuffersOnDrawIndexed(PPCContext& ctx, uint8_t* base) {
   const uint8_t* device = rex::memory::GuestPtr(base, ctx.r3.u32);
   std::lock_guard<std::mutex> lock(g_mutex);
   g_base = base;
+  if (!g_watch_handle) {
+    g_watch_handle =
+        rex::system::kernel_state()->memory()->RegisterPhysicalMemoryInvalidationCallback(
+            OnPhysicalWrite, nullptr);
+  }
   CaptureIndices(device, draw);
   if (draw.problem.empty()) {
     CaptureVertices(device, draw);
   }
   ++g_stats.draws;
-  ++g_stats.primitives[uint32_t(draw.primitive)];
+  ++g_stats.primitives[uint32_t(draw.primitive) & 63];
   if (!draw.problem.empty()) {
     ++g_stats.problems[draw.problem];
   }
@@ -922,12 +994,18 @@ void NativeBuffersDrawBrowser() {
   ImGui::Begin("Draws (indexed)");
   {
     std::lock_guard<std::mutex> lock(g_mutex);
-    ImGui::Text("Last frame: %u draws, capture %.2f ms, %u uploads (%.1f KB)",
-                g_last_stats.draws, g_last_stats.capture_ns / 1e6, g_last_stats.uploads,
-                g_last_stats.upload_bytes / 1024.0);
+    ImGui::Text("Last frame: %u draws, capture %.2f ms (hashing %.1f KB: %.2f ms), %u uploads "
+                "(%.1f KB)",
+                g_last_stats.draws, g_last_stats.capture_ns / 1e6,
+                g_last_stats.hash_bytes / 1024.0, g_last_stats.hash_ns / 1e6,
+                g_last_stats.uploads, g_last_stats.upload_bytes / 1024.0);
     ImGui::Text("Host buffers %zu, uploaded %.1f MB in total", g_buffers.size(),
                 g_total_upload_bytes / (1024.0 * 1024.0));
-    for (const auto& [primitive, count] : g_last_stats.primitives) {
+    for (uint32_t primitive = 0; primitive < 64; ++primitive) {
+      const uint32_t count = g_last_stats.primitives[primitive];
+      if (!count) {
+        continue;
+      }
       ImGui::SameLine();
       ImGui::TextDisabled("| %s %u", PrimitiveName(PrimitiveType(primitive)), count);
     }

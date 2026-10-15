@@ -1470,10 +1470,17 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   object: Common bit 31 = 32-bit, bits 29-30 endianness, +0x18 address,
   +0x1C size in bytes (sizes match the draws' index ranges); D3D ignores
   DrawIndexedVertices' BaseVertexIndex (r5). Buffers are byte-swapped,
-  uploaded on first draw and when their hash changes (once per frame),
-  released after 300 unused frames; 8_8_8_8 integer elements get a float4
-  copy. SDL_GPU never enables primitive restart on Vulkan, so strips with
-  reset indices will need splitting. In a level: no capture problems,
-  0.13 ms per frame, and the draw viewer's wireframe of Marcus is right.
+  uploaded on first draw and re-read only after a write to their pages
+  (the runtime's physical memory write watches, as the emulated GPU's
+  shared memory uses them; a write unprotects and stamps its 256 KB
+  block), re-uploaded if their hash changed, released after 300 unused
+  frames; 8_8_8_8 integer elements get a float4 copy. SDL_GPU never enables
+  primitive restart on Vulkan, so strips with reset indices will need
+  splitting. In a level: no capture problems and the draw viewer's
+  wireframe of Marcus is right. Capture cost in a heavy scene (3387
+  draws): hashing every used buffer once per frame took 3 ms; with write
+  watches 1.2-1.3 ms (9 KB re-hashed per frame, uploads only while new
+  meshes stream in), and with hash maps instead of std::map for the
+  buffer tables 0.9 ms, about 0.27 us per draw.
   Not yet: DrawVertices and the UP draws (BeginVertices/BeginIndexedVertices
   write vertices into the command buffer).
