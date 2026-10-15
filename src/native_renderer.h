@@ -9,6 +9,9 @@
 
 REXCVAR_DECLARE(bool, gears1_native_renderer);
 
+// Main thread: the native renderer's window, or null.
+SDL_Window* NativeRendererWindow();
+
 // Main thread: creates and uploads the textures decoded since the last call,
 // in a copy pass on command_buffer (before any render pass).
 void NativeTexturesUpload(SDL_GPUDevice* device, SDL_GPUCommandBuffer* command_buffer);

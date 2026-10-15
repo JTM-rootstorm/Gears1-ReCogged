@@ -18,6 +18,7 @@
 #include <rex/ppc.h>
 #include <rex/system/xmemory.h>
 
+#include "native_renderer.h"
 #include "probes.h"
 
 REXCVAR_DEFINE_BOOL(gears1_mouse_look, true, "Gears1",
@@ -57,7 +58,9 @@ bool OnEvent(void*, SDL_Event* event) {
 void ApplyCapture(void*) {
   SDL_Window* window = SDL_GetKeyboardFocus();
   if (!window) return;
-  const bool wanted = g_capture_wanted.load() && REXCVAR_GET(gears1_mouse_look);
+  // Never capture the native renderer's window: its overlay needs the cursor.
+  const bool wanted = g_capture_wanted.load() && REXCVAR_GET(gears1_mouse_look) &&
+                      window != NativeRendererWindow();
   if (SDL_GetWindowRelativeMouseMode(window) != wanted) {
     SDL_SetWindowRelativeMouseMode(window, wanted);
     REXLOG_INFO("Mouse look: capture {}", wanted ? "on" : "off");

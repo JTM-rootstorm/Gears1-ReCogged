@@ -1446,3 +1446,13 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   the mips (ImGui's sampler: linear mips, full LOD range), and clicking one
   opens every level at its own size; the overlay now gets mouse input from
   an SDL event watch on the native window.
+- NATIVE OVERLAY FREEZE (2026-10-14, fixed): the mips commit's SDL event
+  watch made our ImGui context current for every event. Watches run on
+  whichever thread pushes the event (the runtime pushes from guest
+  threads) and ImGui's current context is process-wide, so a guest thread
+  could switch it while the main thread was inside the runtime's own ImGui
+  frame: the main thread then hung in ImGui::Begin and the game window
+  froze after a while (sooner with more input). The watch now only queues
+  the native window's mouse events; Present feeds them to ImGui. Also: mouse
+  look captured whichever window had keyboard focus, so it grabbed (and hid
+  the cursor in) the native window; it now never captures that window.

@@ -13,6 +13,8 @@
 #include <cmath>
 #include <cstdint>
 #include <iterator>
+#include <mutex>
+#include <vector>
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -58,41 +60,66 @@ class ImGuiScope {
   ImGuiContext* previous_;
 };
 
-// Mouse input for the overlay, from events on the native window (delivered
-// on the main thread, which also draws the overlay).
+// Mouse input for the overlay. Event watches run on whichever thread pushes
+// the event, and ImGui's current context is process-wide, so the watch only
+// queues the native window's mouse events; Present feeds them to ImGui.
+std::atomic<SDL_WindowID> g_window_id{0};
+std::mutex g_events_mutex;
+std::vector<SDL_Event> g_events;
+
 bool OnEvent(void*, SDL_Event* event) {
-  if (!g_imgui || !g_window) {
-    return true;
-  }
-  const SDL_WindowID window = SDL_GetWindowID(g_window);
-  ImGuiScope scope;
-  ImGuiIO& io = ImGui::GetIO();
+  SDL_WindowID window = 0;
   switch (event->type) {
     case SDL_EVENT_MOUSE_MOTION:
-      if (event->motion.windowID == window) {
-        io.AddMousePosEvent(event->motion.x, event->motion.y);
-      }
+      window = event->motion.windowID;
       break;
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP:
-      if (event->button.windowID == window) {
-        // ImGui: 0 left, 1 right, 2 middle; SDL: 1 left, 2 middle, 3 right.
-        constexpr int kImGuiButton[] = {-1, 0, 2, 1, 3, 4};
-        const uint8_t button = event->button.button;
-        if (button < std::size(kImGuiButton) && kImGuiButton[button] >= 0) {
-          io.AddMouseButtonEvent(kImGuiButton[button], event->button.down);
-        }
-      }
+      window = event->button.windowID;
       break;
     case SDL_EVENT_MOUSE_WHEEL:
-      if (event->wheel.windowID == window) {
-        io.AddMouseWheelEvent(event->wheel.x, event->wheel.y);
-      }
+      window = event->wheel.windowID;
       break;
     default:
-      break;
+      return true;
+  }
+  if (window && window == g_window_id.load()) {
+    std::lock_guard<std::mutex> lock(g_events_mutex);
+    g_events.push_back(*event);
   }
   return true;
+}
+
+// Main thread, with our ImGui context current.
+void FeedEvents() {
+  std::vector<SDL_Event> events;
+  {
+    std::lock_guard<std::mutex> lock(g_events_mutex);
+    events.swap(g_events);
+  }
+  ImGuiIO& io = ImGui::GetIO();
+  for (const SDL_Event& event : events) {
+    switch (event.type) {
+      case SDL_EVENT_MOUSE_MOTION:
+        io.AddMousePosEvent(event.motion.x, event.motion.y);
+        break;
+      case SDL_EVENT_MOUSE_BUTTON_DOWN:
+      case SDL_EVENT_MOUSE_BUTTON_UP: {
+        // ImGui: 0 left, 1 right, 2 middle; SDL: 1 left, 2 middle, 3 right.
+        constexpr int kImGuiButton[] = {-1, 0, 2, 1, 3, 4};
+        const uint8_t button = event.button.button;
+        if (button < std::size(kImGuiButton) && kImGuiButton[button] >= 0) {
+          io.AddMouseButtonEvent(kImGuiButton[button], event.button.down);
+        }
+        break;
+      }
+      case SDL_EVENT_MOUSE_WHEEL:
+        io.AddMouseWheelEvent(event.wheel.x, event.wheel.y);
+        break;
+      default:
+        break;
+    }
+  }
 }
 
 void Create(void*) {
@@ -112,6 +139,7 @@ void Create(void*) {
   init.Device = g_device;
   init.ColorTargetFormat = SDL_GetGPUSwapchainTextureFormat(g_device, g_window);
   ImGui_ImplSDLGPU3_Init(&init);
+  g_window_id = SDL_GetWindowID(g_window);
   SDL_AddEventWatch(OnEvent, nullptr);
   REXLOG_INFO("Native renderer: {} window {}x{}", SDL_GetGPUDeviceDriver(g_device), width, height);
 }
@@ -150,6 +178,7 @@ void Present(void*) {
   ImGuiIO& io = ImGui::GetIO();
   io.DisplaySize = ImVec2(float(width), float(height));
   io.DeltaTime = g_frame_ms > 0.0 ? float(g_frame_ms / 1000.0) : 1.0f / 60.0f;
+  FeedEvents();
   ImGui_ImplSDLGPU3_NewFrame();
   ImGui::NewFrame();
   ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
@@ -183,6 +212,10 @@ void Present(void*) {
 }
 
 }  // namespace
+
+SDL_Window* NativeRendererWindow() {
+  return g_window;
+}
 
 // Post hook of the D3D device init (8223A840, tools/hook_table.py): r3 = the
 // device, r4 = D3DPRESENT_PARAMETERS (BackBufferWidth, BackBufferHeight
