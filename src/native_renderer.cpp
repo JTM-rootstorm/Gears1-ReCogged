@@ -166,6 +166,7 @@ void Present(void*) {
   }
 
   NativeTexturesUpload(g_device, command_buffer);
+  NativeBuffersUpload(g_device, command_buffer);
 
   const uint64_t now = SDL_GetTicksNS();
   if (g_last_present_ns) {
@@ -185,7 +186,7 @@ void Present(void*) {
   ImGui::Begin("Native renderer", nullptr,
                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
                    ImGuiWindowFlags_NoSavedSettings);
-  ImGui::Text("Phase 1 skeleton: clear + overlay");
+  ImGui::Text("Phase 2: resources (textures, vertex and index buffers)");
   ImGui::Text("Guest D3D device %08X, back buffer %ux%u", g_guest_device.load(),
               g_back_buffer_width.load(), g_back_buffer_height.load());
   ImGui::Text("Guest frames %llu, presented %llu", (unsigned long long)g_guest_frames.load(),
@@ -193,9 +194,11 @@ void Present(void*) {
   ImGui::Text("%.2f ms", g_frame_ms);
   ImGui::End();
   NativeTexturesDrawBrowser();
+  NativeBuffersDrawBrowser();
   ImGui::Render();
   ImDrawData* draw_data = ImGui::GetDrawData();
   ImGui_ImplSDLGPU3_PrepareDrawData(draw_data, command_buffer);
+  NativeBuffersRenderPreview(g_device, command_buffer);
 
   // Slowly cycling hue, so a stalled window is obvious.
   const float hue = float(g_guest_frames.load() % 600) / 600.0f * 6.2831853f;
@@ -237,6 +240,7 @@ void Gears1NativeRendererFrame(const Gears1HookEntry&, PPCContext&, uint8_t*) {
     return;
   }
   ++g_guest_frames;
+  NativeBuffersEndFrame();
   if (!g_present_pending.exchange(true)) {
     SDL_RunOnMainThread(Present, nullptr, false);
   }

@@ -17,3 +17,14 @@ SDL_Window* NativeRendererWindow();
 void NativeTexturesUpload(SDL_GPUDevice* device, SDL_GPUCommandBuffer* command_buffer);
 // Main thread, inside an ImGui frame: the texture browser window.
 void NativeTexturesDrawBrowser();
+
+// Guest thread, after each guest frame: publishes the frame's draws.
+void NativeBuffersEndFrame();
+// Main thread: creates and uploads the vertex and index buffers captured since
+// the last call, in a copy pass on command_buffer (before any render pass).
+void NativeBuffersUpload(SDL_GPUDevice* device, SDL_GPUCommandBuffer* command_buffer);
+// Main thread, inside an ImGui frame: the draw list and preview windows.
+void NativeBuffersDrawBrowser();
+// Main thread, after the ImGui frame and before the window's render pass:
+// renders the selected draw's preview.
+void NativeBuffersRenderPreview(SDL_GPUDevice* device, SDL_GPUCommandBuffer* command_buffer);

@@ -15,6 +15,7 @@ set(GEARS1RECOMP_SOURCES
     src/main.cpp
     src/hooks_gen.cpp
     src/mouse_look.cpp
+    src/native_buffers.cpp
     src/native_input.cpp
     src/native_renderer.cpp
     src/native_textures.cpp
@@ -23,6 +24,20 @@ set(GEARS1RECOMP_SOURCES
     third_party/imgui/imgui_impl_sdlgpu3.cpp
 )
 
+# The native renderer's own shaders, compiled to SPIR-V arrays
+# (<name>.<stage>.h in the build tree, variable <name>_<stage>).
+find_program(GLSLANG_VALIDATOR glslangValidator REQUIRED)
+foreach(shader mesh_preview.vert mesh_preview.frag)
+    string(REPLACE "." "_" variable ${shader})
+    set(header ${CMAKE_CURRENT_BINARY_DIR}/${shader}.h)
+    add_custom_command(OUTPUT ${header}
+        COMMAND ${GLSLANG_VALIDATOR} -V --vn ${variable} -o ${header}
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${shader}
+        DEPENDS src/shaders/${shader}
+        VERBATIM)
+    list(APPEND GEARS1RECOMP_SOURCES ${header})
+endforeach()
+
 if(WIN32)
     add_executable(gears1_recomp WIN32 ${GEARS1RECOMP_SOURCES})
 else()
@@ -30,7 +45,7 @@ else()
 endif()
 
 rexglue_setup_target(gears1_recomp GPU_PLUGINS xenos)
-target_include_directories(gears1_recomp PRIVATE third_party/imgui)
+target_include_directories(gears1_recomp PRIVATE third_party/imgui ${CMAKE_CURRENT_BINARY_DIR})
 
 # Optional patched xenos plugin (e.g. built from the SDK source tree). Copied
 # after the stock plugin that rexglue_setup_target stages, so it wins.

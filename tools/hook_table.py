@@ -80,8 +80,9 @@ PROBES = [
     (0x825D4B30, 'TranslucentAdditive', 'policy', {}),
     (0x825D4C80, 'TranslucentModulate', 'policy', {}),
 
-    # D3D draws (r3 = device)
-    (0x8222DE50, 'DrawIndexedVertices', 'draw', {}),
+    # D3D draws (r3 = device). DrawIndexedVertices: native renderer vertex and
+    # index buffers (src/native_buffers.cpp)
+    (0x8222DE50, 'DrawIndexedVertices', 'draw', {'pre': ['Gears1NativeBuffersOnDrawIndexed']}),
     (0x8222DA48, 'DrawVertices', 'draw', {}),
     (0x8222CFF8, 'BeginVertices', 'draw', {}),
     (0x8222D4F8, 'BeginIndexedVertices', 'draw', {}),

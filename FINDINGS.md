@@ -1456,3 +1456,24 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   the native window's mouse events; Present feeds them to ImGui. Also: mouse
   look captured whichever window had keyboard focus, so it grabbed (and hid
   the cursor in) the native window; it now never captures that window.
+- NATIVE VERTEX/INDEX BUFFERS (2026-10-14, src/native_buffers.cpp): UE3
+  never draws with a vertex declaration: RHISetStreamSource (8254E728) and
+  RHISetBoundShaderState (8254E948) both store 0 at +0x2D10, and the
+  pre-draw commit (822346A8) only patches the vertex shader when it is
+  non-zero. The bound vertex shaders are already patched, so the vertex
+  layout comes from the shader at +0x3084: its shader record (header copy
+  at +872) lists each element's fetch instruction (address in instructions
+  from the program start, i.e. microcode + the record's program offset,
+  after the literal constants), usage and usage index; the patched
+  vfetch gives fetch constant, format, signedness, normalization, offset
+  and stride (mini fetches reuse the previous full fetch's). Index buffer
+  object: Common bit 31 = 32-bit, bits 29-30 endianness, +0x18 address,
+  +0x1C size in bytes (sizes match the draws' index ranges); D3D ignores
+  DrawIndexedVertices' BaseVertexIndex (r5). Buffers are byte-swapped,
+  uploaded on first draw and when their hash changes (once per frame),
+  released after 300 unused frames; 8_8_8_8 integer elements get a float4
+  copy. SDL_GPU never enables primitive restart on Vulkan, so strips with
+  reset indices will need splitting. In a level: no capture problems,
+  0.13 ms per frame, and the draw viewer's wireframe of Marcus is right.
+  Not yet: DrawVertices and the UP draws (BeginVertices/BeginIndexedVertices
+  write vertices into the command buffer).

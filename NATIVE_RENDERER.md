@@ -6,7 +6,8 @@ SDL_GPU (Vulkan on Linux, Metal possible later; NATIVE_PORT.md "Platform:
 SDL3"), in the spirit of Unleashed Recompiled. Keep the emulated path as a
 switchable fallback and as the reference to compare against.
 
-Status: phase 1 skeleton (src/native_renderer.cpp). Findings and progress go
+Status: phase 2 resources: textures (src/native_textures.cpp), vertex and
+index buffers (src/native_buffers.cpp). Findings and progress go
 in FINDINGS.md.
 
 Decided (2026-10-10): hook at the Xbox D3D API level; prototype BOTH shader
@@ -150,7 +151,7 @@ project (D3DDevice_*, D3DQuery_*, D3DResource_*, D3D_* for internals;
 | 82235528 | Resolve (only code that loads RB_COPY_CONTROL 0x2318); called by UE3 and by Swap's 8223EF60 |
 | 822364F8 / 822369F0 | BeginTiling / EndTiling (call Clear, viewport, 82228458); dead with the tiling patch |
 | 82222E18 | CreateVertexDeclaration(elements) (12-byte elements, Stream 0xFF ends; object type 5) |
-| 82222DF8 | SetVertexDeclaration → +0x2D10 (UE3 also inlines this store: 8254E728, 8254E948, 82591A48, …) |
+| 82222DF8 | SetVertexDeclaration → +0x2D10 (UE3 also inlines this store: 8254E728, 8254E948, 82591A48, …; the RHI stores 0, so UE3 draws with pre-patched vertex shaders and no declaration, FINDINGS "NATIVE VERTEX/INDEX BUFFERS") |
 | 82222D68 | internal: set a built-in declaration (+0x2F80 = 2), used by 8223A0E0 |
 | 82222AC8 / 82222710 | CreateVertexShader / CreatePixelShader (XDK path: 8221D020, 8249AED8, 8254F9E0, 827DBF20) |
 | 822229D0 | VS object init(vs, physical microcode): type 6, header copy at +872, microcode ptr at +32 |

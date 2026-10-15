@@ -189,6 +189,7 @@ void DumpFrame() {
 }
 }  // namespace
 
+void Gears1NativeBuffersOnDrawIndexed(PPCContext& ctx, uint8_t* base);
 void Gears1NativeTexturesOnSetTexture(PPCContext& ctx, uint8_t* base);
 void Gears1OnSetPixelShader(PPCContext& ctx, uint8_t* base);
 void Gears1OnSetVertexShader(PPCContext& ctx, uint8_t* base);
@@ -474,6 +475,7 @@ REX_EXTERN(__imp__sub_8222DE50);
 extern "C" REX_FUNC(sub_8222DE50) {
   Count(198);
   // DrawIndexedVertices
+  Gears1NativeBuffersOnDrawIndexed(ctx, base);
   Gears1ProbeDraw(48, ctx, base);
   __imp__sub_8222DE50(ctx, base);
 }
