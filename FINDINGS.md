@@ -1484,3 +1484,17 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   buffer tables 0.9 ms, about 0.27 us per draw.
   Not yet: DrawVertices and the UP draws (BeginVertices/BeginIndexedVertices
   write vertices into the command buffer).
+- IMPORT CALL COUNTS (2026-10-25): local/gears1-debug was restacked on
+  gears1-main (old tip 2b96123; kept only its RoundingModeRTE cvar, frame
+  stepping hotkeys and optional host-coherent flush; the shader tool lives
+  on local/shader-tools) and gained 520715f: every REX_HOOK / REX_HOOK_RAW /
+  REX_STUB* counts calls, first call time and up to 8 guest return
+  addresses, and `--import_call_counts_file=<path>` rewrites them as TSV
+  every 5 s. The Release runtime_override/ and staged plugin are now that
+  build; the 2026-10-11 runtime is in runtime_override_2026-10-11/. A 45 s
+  boot run hit 117 hooks: 24 of Gears' 92 xam imports, 93 of its 144 kernel
+  imports. Hottest: RtlEnter/LeaveCriticalSection (2.6M each),
+  XamInputGetState (357k), the spin lock / IRQL set (~300k),
+  KeDelayExecutionThread (278k, one caller, 82613800). The table joining
+  these with the real 17559 xam is ~/Documents/Programming/Recomp/X360/
+  COVERAGE.md (outside git; tools/build.sh rebuilds it).
