@@ -18,6 +18,7 @@ set(GEARS1RECOMP_SOURCES
     src/native_buffers.cpp
     src/native_input.cpp
     src/native_renderer.cpp
+    src/native_targets.cpp
     src/native_textures.cpp
     src/probes.cpp
     src/shader_dump.cpp
@@ -27,7 +28,8 @@ set(GEARS1RECOMP_SOURCES
 # The native renderer's own shaders, compiled to SPIR-V arrays
 # (<name>.<stage>.h in the build tree, variable <name>_<stage>).
 find_program(GLSLANG_VALIDATOR glslangValidator REQUIRED)
-foreach(shader mesh_preview.vert mesh_preview.frag)
+foreach(shader mesh_preview.vert mesh_preview.frag rect.vert clear.frag
+        clear_depth.frag copy.frag)
     string(REPLACE "." "_" variable ${shader})
     set(header ${CMAKE_CURRENT_BINARY_DIR}/${shader}.h)
     add_custom_command(OUTPUT ${header}

@@ -5,11 +5,13 @@
 // dwords at +0x1C of the texture object, which SetTexture merges into the
 // device's sampler state) gives the format, size, tiling, endianness and
 // physical address. Every level (base at the base address, mips at the mip
-// address, the smallest levels together in the packed mip tail) is untiled
-// and byte-swapped with the runtime's texture helpers
-// (rex::graphics::texture_util / _conversion), then uploaded on the main
-// thread. Channels stay as the guest stores them;
-// the fetch constant's swizzle is applied when sampling (phase 3).
+// address, the smallest levels together in the packed mip tail) of every
+// array slice or cube face is untiled and byte-swapped with the runtime's
+// texture helpers (rex::graphics::texture_util / _conversion), then uploaded
+// on the main thread. Channels stay as the guest stores them;
+// the fetch constant's swizzle is applied when sampling (phase 3). Textures a
+// D3D Resolve wrote are the native render targets' (src/native_targets.cpp),
+// not decoded from guest memory.
 
 #include <algorithm>
 #include <array>
@@ -75,6 +77,7 @@ SDL_GPUTextureFormat HostFormat(TextureFormat format) {
 }
 
 struct DecodedLevel {
+  uint32_t level, layer;
   uint32_t width, height;     // texels
   uint32_t row_texels, rows;  // upload layout: whole blocks
   size_t offset;              // in DecodedTexture::data
@@ -83,10 +86,12 @@ struct DecodedLevel {
 struct DecodedTexture {
   uint32_t address;
   uint32_t width, height;  // base level, texels
+  SDL_GPUTextureType type;
+  uint32_t layers;  // array slices or cube faces
   TextureFormat guest_format;
   SDL_GPUTextureFormat host_format;
-  // Levels mip_min_level..; the texture has levels.size() + first_level.
-  uint32_t first_level;
+  // Levels first_level..level_count - 1 of every layer.
+  uint32_t first_level, level_count;
   std::vector<DecodedLevel> levels;
   std::vector<uint8_t> data;
 };
@@ -94,6 +99,8 @@ struct DecodedTexture {
 struct HostTexture {
   uint32_t address;
   uint32_t width, height, level_count;
+  SDL_GPUTextureType type;
+  uint32_t layers;
   TextureFormat guest_format;
   SDL_GPUTexture* texture;
 };
@@ -103,6 +110,7 @@ std::unordered_set<std::string> g_seen;  // fetch dwords 0-2: address, format, s
 std::vector<DecodedTexture> g_pending;
 std::map<std::string, uint32_t> g_unsupported;  // reason -> count
 uint32_t g_decoded = 0;
+uint32_t g_resolved_binds = 0;  // binds of Resolve destinations
 
 // Main thread only.
 std::vector<HostTexture> g_textures;
@@ -110,7 +118,8 @@ std::vector<HostTexture> g_textures;
 bool Decode(const xe_gpu_texture_fetch_t& fetch, uint8_t* base, DecodedTexture& out,
             std::string& reason) {
   using namespace rex::graphics;
-  if (fetch.dimension != xenos::DataDimension::k2DOrStacked) {
+  if (fetch.dimension != xenos::DataDimension::k2DOrStacked &&
+      fetch.dimension != xenos::DataDimension::kCube) {
     reason = "dimension " + std::to_string(uint32_t(fetch.dimension));
     return false;
   }
@@ -128,12 +137,21 @@ bool Decode(const xe_gpu_texture_fetch_t& fetch, uint8_t* base, DecodedTexture& 
   out.address = base_page << 12;
   out.width = width_minus_1 + 1;
   out.height = height_minus_1 + 1;
+  out.layers = depth_minus_1 + 1;
+  out.type = fetch.dimension == xenos::DataDimension::kCube ? SDL_GPU_TEXTURETYPE_CUBE
+             : fetch.stacked                                ? SDL_GPU_TEXTURETYPE_2D_ARRAY
+                                                            : SDL_GPU_TEXTURETYPE_2D;
+  if (out.type == SDL_GPU_TEXTURETYPE_CUBE && out.layers != 6) {
+    reason = "cube with " + std::to_string(out.layers) + " faces";
+    return false;
+  }
   const xenos::Endian endian = fetch.endianness;
   const texture_util::TextureGuestLayout layout = texture_util::GetGuestTextureLayout(
       fetch.dimension, fetch.pitch, out.width, out.height, depth_minus_1 + 1, fetch.tiled,
       fetch.format, fetch.packed_mips, base_page != 0, mip_max);
   const uint32_t block_bytes = info->bytes_per_block();
   out.first_level = base_page ? 0 : mip_min;
+  out.level_count = mip_max + 1;
   for (uint32_t level = out.first_level; level <= mip_max; ++level) {
     const uint32_t stored = std::min(level, layout.packed_level);
     const texture_util::TextureGuestLayout::Level& guest_level =
@@ -148,41 +166,46 @@ bool Decode(const xe_gpu_texture_fetch_t& fetch, uint8_t* base, DecodedTexture& 
       texture_util::GetPackedMipOffset(out.width, out.height, depth_minus_1 + 1, fetch.format,
                                        level, offset_x, offset_y, offset_z);
     }
-    DecodedLevel decoded;
-    decoded.width = std::max(out.width >> level, 1u);
-    decoded.height = std::max(out.height >> level, 1u);
-    const uint32_t blocks_x = (decoded.width + info->block_width - 1) / info->block_width;
-    const uint32_t blocks_y = (decoded.height + info->block_height - 1) / info->block_height;
-    decoded.row_texels = blocks_x * info->block_width;
-    decoded.rows = blocks_y * info->block_height;
-    decoded.offset = out.data.size();
-    out.data.resize(out.data.size() + size_t(blocks_x) * blocks_y * block_bytes);
-    uint8_t* destination = out.data.data() + decoded.offset;
-    const uint8_t* source = rex::memory::GuestPtr(base, kPhysicalMirror | address);
-    if (fetch.tiled) {
-      texture_conversion::UntileInfo untile = {};
-      untile.offset_x = offset_x;
-      untile.offset_y = offset_y;
-      untile.width = blocks_x;
-      untile.height = blocks_y;
-      untile.input_pitch = guest_level.row_pitch_bytes / block_bytes;
-      untile.output_pitch = blocks_x;
-      untile.input_format_info = info;
-      untile.output_format_info = info;
-      untile.copy_callback = [endian](void* output, const void* input, size_t length) {
-        texture_conversion::CopySwapBlock(endian, output, input, length);
-      };
-      texture_conversion::Untile(destination, source, &untile);
-    } else {
-      const uint32_t row_bytes = blocks_x * block_bytes;
-      source += size_t(offset_y) * guest_level.row_pitch_bytes + size_t(offset_x) * block_bytes;
-      for (uint32_t y = 0; y < blocks_y; ++y) {
-        texture_conversion::CopySwapBlock(endian, destination + size_t(y) * row_bytes,
-                                          source + size_t(y) * guest_level.row_pitch_bytes,
-                                          row_bytes);
+    for (uint32_t layer = 0; layer < out.layers; ++layer) {
+      DecodedLevel decoded;
+      decoded.level = level;
+      decoded.layer = layer;
+      decoded.width = std::max(out.width >> level, 1u);
+      decoded.height = std::max(out.height >> level, 1u);
+      const uint32_t blocks_x = (decoded.width + info->block_width - 1) / info->block_width;
+      const uint32_t blocks_y = (decoded.height + info->block_height - 1) / info->block_height;
+      decoded.row_texels = blocks_x * info->block_width;
+      decoded.rows = blocks_y * info->block_height;
+      decoded.offset = out.data.size();
+      out.data.resize(out.data.size() + size_t(blocks_x) * blocks_y * block_bytes);
+      uint8_t* destination = out.data.data() + decoded.offset;
+      const uint8_t* source = rex::memory::GuestPtr(
+          base, kPhysicalMirror | (address + layer * guest_level.array_slice_stride_bytes));
+      if (fetch.tiled) {
+        texture_conversion::UntileInfo untile = {};
+        untile.offset_x = offset_x;
+        untile.offset_y = offset_y;
+        untile.width = blocks_x;
+        untile.height = blocks_y;
+        untile.input_pitch = guest_level.row_pitch_bytes / block_bytes;
+        untile.output_pitch = blocks_x;
+        untile.input_format_info = info;
+        untile.output_format_info = info;
+        untile.copy_callback = [endian](void* output, const void* input, size_t length) {
+          texture_conversion::CopySwapBlock(endian, output, input, length);
+        };
+        texture_conversion::Untile(destination, source, &untile);
+      } else {
+        const uint32_t row_bytes = blocks_x * block_bytes;
+        source += size_t(offset_y) * guest_level.row_pitch_bytes + size_t(offset_x) * block_bytes;
+        for (uint32_t y = 0; y < blocks_y; ++y) {
+          texture_conversion::CopySwapBlock(endian, destination + size_t(y) * row_bytes,
+                                            source + size_t(y) * guest_level.row_pitch_bytes,
+                                            row_bytes);
+        }
       }
+      out.levels.push_back(decoded);
     }
-    out.levels.push_back(decoded);
   }
   return true;
 }
@@ -202,6 +225,12 @@ void Gears1NativeTexturesOnSetTexture(PPCContext& ctx, uint8_t* base) {
   }
   xe_gpu_texture_fetch_t fetch;
   std::memcpy(&fetch, words, sizeof(fetch));
+  if (NativeTargetsIsResolved(fetch.base_address << 12, uint32_t(fetch.format),
+                              fetch.size_2d.width + 1, fetch.size_2d.height + 1)) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ++g_resolved_binds;
+    return;
+  }
   std::string key(reinterpret_cast<const char*>(words), 12);
   {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -217,7 +246,9 @@ void Gears1NativeTexturesOnSetTexture(PPCContext& ctx, uint8_t* base) {
     ++g_decoded;
     g_pending.push_back(std::move(texture));
   } else {
-    ++g_unsupported[reason];
+    if (!g_unsupported[reason]++) {
+      REXLOG_INFO("Native textures: not decoded: {}", reason);
+    }
   }
 }
 
@@ -232,7 +263,8 @@ void NativeTexturesUpload(SDL_GPUDevice* device, SDL_GPUCommandBuffer* command_b
   }
   size_t total = 0;
   for (const DecodedTexture& texture : pending) {
-    total += texture.data.size();
+    // Copies from the transfer buffer start at a multiple of the block size.
+    total += (texture.data.size() + 15) & ~size_t(15);
   }
   SDL_GPUTransferBufferCreateInfo transfer_info = {};
   transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
@@ -247,13 +279,13 @@ void NativeTexturesUpload(SDL_GPUDevice* device, SDL_GPUCommandBuffer* command_b
   uint32_t offset = 0;
   for (const DecodedTexture& texture : pending) {
     SDL_GPUTextureCreateInfo create_info = {};
-    create_info.type = SDL_GPU_TEXTURETYPE_2D;
+    create_info.type = texture.type;
     create_info.format = texture.host_format;
     create_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
     create_info.width = texture.width;
     create_info.height = texture.height;
-    create_info.layer_count_or_depth = 1;
-    create_info.num_levels = texture.first_level + uint32_t(texture.levels.size());
+    create_info.layer_count_or_depth = texture.layers;
+    create_info.num_levels = texture.level_count;
     SDL_GPUTexture* host = SDL_CreateGPUTexture(device, &create_info);
     if (!host) {
       REXLOG_WARN("Native textures: {}x{} format {} not created: {}", texture.width,
@@ -261,8 +293,7 @@ void NativeTexturesUpload(SDL_GPUDevice* device, SDL_GPUCommandBuffer* command_b
       continue;
     }
     std::memcpy(mapped + offset, texture.data.data(), texture.data.size());
-    for (size_t i = 0; i < texture.levels.size(); ++i) {
-      const DecodedLevel& level = texture.levels[i];
+    for (const DecodedLevel& level : texture.levels) {
       SDL_GPUTextureTransferInfo source = {};
       source.transfer_buffer = transfer;
       source.offset = offset + uint32_t(level.offset);
@@ -270,15 +301,16 @@ void NativeTexturesUpload(SDL_GPUDevice* device, SDL_GPUCommandBuffer* command_b
       source.rows_per_layer = level.rows;
       SDL_GPUTextureRegion destination = {};
       destination.texture = host;
-      destination.mip_level = texture.first_level + uint32_t(i);
+      destination.mip_level = level.level;
+      destination.layer = level.layer;
       destination.w = level.width;
       destination.h = level.height;
       destination.d = 1;
       SDL_UploadToGPUTexture(copy_pass, &source, &destination, false);
     }
-    offset += uint32_t(texture.data.size());
-    g_textures.push_back({texture.address, texture.width, texture.height,
-                          create_info.num_levels, texture.guest_format, host});
+    offset += (uint32_t(texture.data.size()) + 15) & ~15u;
+    g_textures.push_back({texture.address, texture.width, texture.height, create_info.num_levels,
+                          texture.type, texture.layers, texture.guest_format, host});
   }
   SDL_EndGPUCopyPass(copy_pass);
   SDL_UnmapGPUTransferBuffer(device, transfer);
@@ -294,7 +326,8 @@ void NativeTexturesDrawBrowser() {
   ImGui::Begin("Textures (guest channel order)");
   {
     std::lock_guard<std::mutex> lock(g_mutex);
-    ImGui::Text("Decoded %u, uploaded %zu", g_decoded, g_textures.size());
+    ImGui::Text("Decoded %u, uploaded %zu, binds of resolved textures %u", g_decoded,
+                g_textures.size(), g_resolved_binds);
     for (const auto& [reason, count] : g_unsupported) {
       ImGui::SameLine();
       ImGui::TextDisabled("| %s: %u", reason.c_str(), count);
@@ -310,14 +343,19 @@ void NativeTexturesDrawBrowser() {
       ImGui::SameLine();
     }
     ImGui::PushID(i);
-    if (ImGui::ImageButton("texture", ImTextureRef(ImTextureID(texture.texture)),
-                           ImVec2(92.0f, 92.0f))) {
+    // ImGui samples 2D textures only (SDL_GPU has no views of one layer).
+    if (texture.type != SDL_GPU_TEXTURETYPE_2D) {
+      ImGui::Button(texture.type == SDL_GPU_TEXTURETYPE_CUBE ? "cube" : "array",
+                    ImVec2(100.0f, 100.0f));
+    } else if (ImGui::ImageButton("texture", ImTextureRef(ImTextureID(texture.texture)),
+                                  ImVec2(92.0f, 92.0f))) {
       selected = i;
     }
     ImGui::PopID();
     if (ImGui::IsItemHovered()) {
-      ImGui::SetTooltip("%08X  %ux%u  %u levels  format %u", texture.address, texture.width,
-                        texture.height, texture.level_count, uint32_t(texture.guest_format));
+      ImGui::SetTooltip("%08X  %ux%u  %u layers  %u levels  format %u", texture.address,
+                        texture.width, texture.height, texture.layers, texture.level_count,
+                        uint32_t(texture.guest_format));
     }
   }
   ImGui::End();

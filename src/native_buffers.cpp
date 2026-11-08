@@ -1,7 +1,8 @@
 // Native renderer, phase 2: guest vertex and index buffers as SDL_GPU buffers.
 //
-// Captured at D3D DrawIndexedVertices (pre hook, tools/hook_table.py) from the
-// device's bound state (NATIVE_RENDERER.md "D3D API map"):
+// Captured at D3D DrawIndexedVertices and DrawVertices (pre hooks,
+// tools/hook_table.py) from the device's bound state (NATIVE_RENDERER.md "D3D
+// API map"):
 // - the index buffer object: Common bit 31 = 32-bit indices, bits 29-30 =
 //   endianness, +0x18 address, +0x1C size in bytes;
 // - the vertex layout of the bound vertex shader (+0x3084). UE3 binds
@@ -17,10 +18,17 @@
 // then again whenever their contents change, and released after a while
 // unused. Changes are found with the runtime's physical memory write watches
 // (as the emulated GPU's shared memory finds them): a buffer is re-read, and
-// re-uploaded if its hash changed, only after a write to one of its pages. The game's 8_8_8_8 integer
-// elements have no SDL_GPU format the translated shaders can read as float (no
-// USCALED), so each gets a float4 copy in a buffer of its own. Vertex inputs are
-// at the locations rexgpu-shader-tool --host-vertex-input gives each usage.
+// re-uploaded if its hash changed, only after a write to one of its pages. The game's 8_8_8_8
+// integer elements have no SDL_GPU format the translated shaders can read as float (no USCALED), so
+// each gets a float4 copy in a buffer of its own. Vertex inputs are at the locations
+// rexgpu-shader-tool --host-vertex-input gives each usage.
+//
+// The UP draws (BeginVertices / BeginIndexedVertices, post hooks) get their
+// vertices and indices in command buffer memory that D3D returns and the
+// caller fills afterwards (EndVertices is inlined), so they are read at the
+// next draw or the end of the frame. D3D points vertex fetch constant 95
+// (stream 0) at them, 8in32; indices are 8in16 or 8in32, offset by the base
+// vertex index.
 //
 // The draw viewer lists the draws of one guest frame and renders the selected
 // one in wireframe from its uploaded buffers and vertex layout.
@@ -55,6 +63,7 @@
 #include "mesh_preview.frag.h"
 #include "mesh_preview.vert.h"
 #include "native_renderer.h"
+#include "probes.h"
 
 namespace {
 
@@ -115,6 +124,10 @@ struct BufferKey {
   auto operator<=>(const BufferKey&) const = default;
 };
 constexpr uint32_t kVertexBuffer = 0, kIndexBuffer = 1;
+// UP draw data, re-read on each draw.
+constexpr uint32_t kUpVertexBuffer = 2, kUpIndexBuffer = 3;
+// The vertex fetch constant D3D sets for UP draws.
+constexpr uint32_t kUpFetchConstant = 95;
 // The float4 copy of a vertex buffer's 8_8_8_8 integer element.
 uint32_t ConvertedVariant(uint32_t stride, uint32_t offset) {
   return 1u << 31 | stride << 12 | offset;
@@ -138,11 +151,17 @@ struct Element {
 
 struct DrawRecord {
   PrimitiveType primitive;
+  bool indexed;
+  bool up;
+  // Indexed: indices start_index.. of the index buffer, each plus
+  // index_offset; otherwise vertices start_index...
   uint32_t start_index, index_count;
-  BufferKey index_buffer;
-  bool index32;
-  bool reset;  // a strip with primitive reset indices in the drawn range
-  uint32_t min_index, max_index;  // in the drawn range, reset indices excluded
+  int32_t index_offset = 0;
+  BufferKey index_buffer = {};
+  bool index32 = false;
+  bool reset = false;  // a strip with primitive reset indices in the drawn range
+  // Vertices used (index_offset applied, reset indices excluded).
+  uint32_t min_index = 0, max_index = 0;
   uint32_t vertex_shader;
   std::vector<Binding> bindings;
   std::vector<Element> elements;
@@ -183,6 +202,15 @@ struct FrameStats {
   std::array<uint32_t, 64> primitives = {};  // draws per Xenos primitive type
 };
 
+// A UP draw whose data the caller has not written yet.
+struct PendingUp {
+  size_t draw;  // in g_draws
+  uint32_t vertex_bytes;
+  uint32_t index_bytes;
+  Endian index_endian;
+  uint32_t reset_index;
+};
+
 // Write watches. The runtime calls OnPhysicalWrite on the first write to a
 // watched page, on the writing thread and under its global lock (so it takes
 // no locks of ours), then unprotects the pages: each write stamps its pages
@@ -207,6 +235,7 @@ std::unordered_map<RangeKey, IndexRange, rex::XXHasher<RangeKey>> g_ranges;
 // Fetch formats seen: format | signed << 6 | integer << 7.
 std::array<bool, 256> g_formats = {};
 std::vector<DrawRecord> g_draws;
+std::vector<PendingUp> g_pending_up;
 FrameStats g_stats;
 // Published at the end of each guest frame, under g_mutex.
 std::vector<DrawRecord> g_last_draws;
@@ -317,6 +346,45 @@ void Queue(const BufferKey& key, uint32_t version, SDL_GPUBufferUsageFlags usage
   g_pending.push_back(std::move(upload));
 }
 
+// Queues a byte-swapped copy of the guest buffer.
+void QueueSwapped(const BufferKey& key, uint32_t version, Endian endian,
+                  SDL_GPUBufferUsageFlags usage) {
+  Queue(key, version, usage, key.size,
+        [&](uint8_t* out) { CopySwapBlock(endian, out, GuestPhysical(key.address), key.size); });
+}
+
+// Queues the float4 copy of an 8_8_8_8 integer element of the vertex buffer raw
+// and returns its key.
+BufferKey QueueConverted(const BufferKey& raw, uint32_t version, Endian endian, uint32_t stride,
+                         uint32_t offset) {
+  const BufferKey key = {raw.address, raw.size, ConvertedVariant(stride, offset)};
+  const uint32_t vertices =
+      raw.size >= offset + 4 && stride ? (raw.size - offset - 4) / stride + 1 : 0;
+  Queue(key, version, SDL_GPU_BUFFERUSAGE_VERTEX, vertices * 16, [&](uint8_t* out) {
+    const uint8_t* guest = GuestPhysical(raw.address) + offset;
+    for (uint32_t v = 0; v < vertices; ++v) {
+      uint8_t bytes[4];
+      CopySwapBlock(endian, bytes, guest + size_t(v) * stride, 4);
+      const float values[4] = {float(bytes[0]), float(bytes[1]), float(bytes[2]), float(bytes[3])};
+      std::memcpy(out + size_t(v) * 16, values, 16);
+    }
+  });
+  return key;
+}
+
+// The primitive reset index of a strip draw, or UINT32_MAX when reset is off.
+uint32_t ResetIndex(const uint8_t* device, const DrawRecord& draw) {
+  PA_SU_SC_MODE_CNTL mode_control;
+  mode_control.value = rex::memory::load_and_swap<uint32_t>(device + kDeviceModeControl);
+  const bool strip = draw.primitive == PrimitiveType::kTriangleStrip ||
+                     draw.primitive == PrimitiveType::kLineStrip;
+  if (!strip || !mode_control.multi_prim_ib_ena) {
+    return UINT32_MAX;
+  }
+  return rex::memory::load_and_swap<uint32_t>(device + kDeviceResetIndex) &
+         (draw.index32 ? 0xFFFFFF : 0xFFFF);
+}
+
 IndexRange ScanIndices(const DrawRecord& draw, Endian endian, uint32_t reset_index) {
   const uint32_t index_bytes = draw.index32 ? 4 : 2;
   std::vector<uint8_t> swapped(size_t(draw.index_count) * index_bytes);
@@ -343,6 +411,8 @@ IndexRange ScanIndices(const DrawRecord& draw, Endian endian, uint32_t reset_ind
   return range;
 }
 
+void ScanRange(DrawRecord& draw, uint32_t version, Endian endian, uint32_t reset_index);
+
 void CaptureIndices(const uint8_t* device, DrawRecord& draw) {
   const uint32_t object = rex::memory::load_and_swap<uint32_t>(device + kDeviceIndexBuffer);
   if (!object) {
@@ -366,22 +436,12 @@ void CaptureIndices(const uint8_t* device, DrawRecord& draw) {
     return;
   }
   const uint32_t version = Check(draw.index_buffer);
-  Queue(draw.index_buffer, version, SDL_GPU_BUFFERUSAGE_INDEX, draw.index_buffer.size,
-        [&](uint8_t* out) {
-          CopySwapBlock(endian, out, GuestPhysical(draw.index_buffer.address),
-                        draw.index_buffer.size);
-        });
+  QueueSwapped(draw.index_buffer, version, endian, SDL_GPU_BUFFERUSAGE_INDEX);
+  ScanRange(draw, version, endian, ResetIndex(device, draw));
+}
 
-  // Primitive reset only applies to strips, when enabled.
-  PA_SU_SC_MODE_CNTL mode_control;
-  mode_control.value = rex::memory::load_and_swap<uint32_t>(device + kDeviceModeControl);
-  const bool strip = draw.primitive == PrimitiveType::kTriangleStrip ||
-                     draw.primitive == PrimitiveType::kLineStrip;
-  uint32_t reset_index = UINT32_MAX;
-  if (strip && mode_control.multi_prim_ib_ena) {
-    reset_index = rex::memory::load_and_swap<uint32_t>(device + kDeviceResetIndex) &
-                  (draw.index32 ? 0xFFFFFF : 0xFFFF);
-  }
+// The drawn range's vertices, cached per index buffer version.
+void ScanRange(DrawRecord& draw, uint32_t version, Endian endian, uint32_t reset_index) {
   if (g_ranges.size() > (1 << 16)) {
     g_ranges.clear();
   }
@@ -390,12 +450,15 @@ void CaptureIndices(const uint8_t* device, DrawRecord& draw) {
   if (inserted) {
     it->second = ScanIndices(draw, endian, reset_index);
   }
-  draw.min_index = it->second.min_index;
-  draw.max_index = it->second.max_index;
+  draw.min_index = it->second.min_index + draw.index_offset;
+  draw.max_index = it->second.max_index + draw.index_offset;
   draw.reset = it->second.reset;
 }
 
-void CaptureVertices(const uint8_t* device, DrawRecord& draw) {
+// up_vertices: the UP draw's vertices, which fetch constant 95 reads; they are
+// queued once the caller has written them (FinishUpDraws).
+void CaptureVertices(const uint8_t* device, DrawRecord& draw,
+                     const BufferKey* up_vertices = nullptr) {
   using rex::memory::load_and_swap;
   draw.vertex_shader = load_and_swap<uint32_t>(device + kDeviceVertexShader);
   if (!draw.vertex_shader) {
@@ -470,7 +533,15 @@ void CaptureVertices(const uint8_t* device, DrawRecord& draw) {
                     [&](const Element& other) { return other.location == element.location; })) {
       continue;
     }
-    if (constant_bindings[constant] < 0) {
+    if (constant_bindings[constant] < 0 && up_vertices) {
+      if (constant != kUpFetchConstant) {
+        draw.problem = "UP draw fetches constant " + std::to_string(constant);
+        return;
+      }
+      constant_fetches[constant].endian = Endian::k8in32;
+      constant_bindings[constant] = int(draw.bindings.size());
+      draw.bindings.push_back({*up_vertices, stride});
+    } else if (constant_bindings[constant] < 0) {
       const uint8_t* constant_words = device + kDeviceFetchConstants + constant * 8;
       xe_gpu_vertex_fetch_t& fetch = constant_fetches[constant];
       fetch.dword_0 = load_and_swap<uint32_t>(constant_words);
@@ -486,10 +557,7 @@ void CaptureVertices(const uint8_t* device, DrawRecord& draw) {
         return;
       }
       constant_versions[constant] = Check(key);
-      Queue(key, constant_versions[constant], SDL_GPU_BUFFERUSAGE_VERTEX, key.size,
-            [&](uint8_t* out) {
-              CopySwapBlock(fetch.endian, out, GuestPhysical(key.address), key.size);
-            });
+      QueueSwapped(key, constant_versions[constant], fetch.endian, SDL_GPU_BUFFERUSAGE_VERTEX);
       constant_bindings[constant] = int(draw.bindings.size());
       draw.bindings.push_back({key, stride});
     }
@@ -523,21 +591,10 @@ void CaptureVertices(const uint8_t* device, DrawRecord& draw) {
         element.format = SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM;
         if (integer) {
           const BufferKey& raw = binding.buffer;
-          const BufferKey key = {raw.address, raw.size, ConvertedVariant(stride, offset)};
-          const uint32_t vertices =
-              raw.size >= offset + 4 && stride ? (raw.size - offset - 4) / stride + 1 : 0;
-          const Endian endian = element.endian;
-          Queue(key, constant_versions[constant], SDL_GPU_BUFFERUSAGE_VERTEX, vertices * 16,
-                [&](uint8_t* out) {
-                  const uint8_t* guest = GuestPhysical(raw.address) + offset;
-                  for (uint32_t v = 0; v < vertices; ++v) {
-                    uint8_t bytes[4];
-                    CopySwapBlock(endian, bytes, guest + size_t(v) * stride, 4);
-                    const float values[4] = {float(bytes[0]), float(bytes[1]), float(bytes[2]),
-                                             float(bytes[3])};
-                    std::memcpy(out + size_t(v) * 16, values, 16);
-                  }
-                });
+          const BufferKey key =
+              up_vertices ? BufferKey{raw.address, raw.size, ConvertedVariant(stride, offset)}
+                          : QueueConverted(raw, constant_versions[constant], element.endian, stride,
+                                           offset);
           element.binding = uint32_t(draw.bindings.size());
           element.offset = 0;
           element.format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
@@ -553,6 +610,58 @@ void CaptureVertices(const uint8_t* device, DrawRecord& draw) {
     }
     draw.elements.push_back(element);
   }
+}
+
+// Reads the UP draws' data, which their callers have written by now.
+void FinishUpDraws() {
+  for (const PendingUp& pending : g_pending_up) {
+    DrawRecord& draw = g_draws[pending.draw];
+    if (!draw.problem.empty()) {
+      continue;
+    }
+    const BufferKey& vertices = draw.bindings[0].buffer;
+    const uint32_t version =
+        uint32_t(XXH3_64bits(GuestPhysical(vertices.address), vertices.size)) | 1;
+    QueueSwapped(vertices, version, Endian::k8in32, SDL_GPU_BUFFERUSAGE_VERTEX);
+    for (const Element& element : draw.elements) {
+      const BufferKey& key = draw.bindings[element.binding].buffer;
+      if (key.variant >> 31) {
+        QueueConverted(vertices, version, Endian::k8in32, element.guest_stride,
+                       element.guest_offset);
+      }
+    }
+    if (draw.indexed) {
+      const uint32_t index_version =
+          uint32_t(XXH3_64bits(GuestPhysical(draw.index_buffer.address), draw.index_buffer.size)) |
+          1;
+      QueueSwapped(draw.index_buffer, index_version, pending.index_endian,
+                   SDL_GPU_BUFFERUSAGE_INDEX);
+      ScanRange(draw, index_version, pending.index_endian, pending.reset_index);
+    }
+  }
+  g_pending_up.clear();
+}
+
+// Starts capturing a draw: under g_mutex, after the previous UP draws' data
+// has been read.
+void BeginCapture(uint8_t* base) {
+  g_base = base;
+  if (!g_watch_handle) {
+    g_watch_handle =
+        rex::system::kernel_state()->memory()->RegisterPhysicalMemoryInvalidationCallback(
+            OnPhysicalWrite, nullptr);
+  }
+  FinishUpDraws();
+}
+
+void AddDraw(DrawRecord&& draw, uint64_t start_ns) {
+  ++g_stats.draws;
+  ++g_stats.primitives[uint32_t(draw.primitive) & 63];
+  if (!draw.problem.empty()) {
+    ++g_stats.problems[draw.problem];
+  }
+  g_draws.push_back(std::move(draw));
+  g_stats.capture_ns += SDL_GetTicksNS() - start_ns;
 }
 
 // Main thread: the selected draw of a captured frame, and its wireframe
@@ -811,34 +920,121 @@ void Gears1NativeBuffersOnDrawIndexed(PPCContext& ctx, uint8_t* base) {
   const uint64_t start_ns = SDL_GetTicksNS();
   DrawRecord draw;
   draw.primitive = PrimitiveType(ctx.r4.u32);
+  draw.indexed = true;
+  draw.up = false;
   draw.start_index = ctx.r6.u32;
   draw.index_count = ctx.r7.u32;
   const uint8_t* device = rex::memory::GuestPtr(base, ctx.r3.u32);
   std::lock_guard<std::mutex> lock(g_mutex);
-  g_base = base;
-  if (!g_watch_handle) {
-    g_watch_handle =
-        rex::system::kernel_state()->memory()->RegisterPhysicalMemoryInvalidationCallback(
-            OnPhysicalWrite, nullptr);
-  }
+  BeginCapture(base);
   CaptureIndices(device, draw);
   if (draw.problem.empty()) {
     CaptureVertices(device, draw);
   }
-  ++g_stats.draws;
-  ++g_stats.primitives[uint32_t(draw.primitive) & 63];
-  if (!draw.problem.empty()) {
-    ++g_stats.problems[draw.problem];
+  AddDraw(std::move(draw), start_ns);
+}
+
+// Pre hook of D3D DrawVertices (8222DA48): r3 = device, r4 = primitive type,
+// r5 = start vertex, r6 = vertex count.
+void Gears1NativeBuffersOnDraw(PPCContext& ctx, uint8_t* base) {
+  if (!REXCVAR_GET(gears1_native_renderer)) {
+    return;
   }
-  g_draws.push_back(std::move(draw));
-  g_stats.capture_ns += SDL_GetTicksNS() - start_ns;
+  const uint64_t start_ns = SDL_GetTicksNS();
+  DrawRecord draw;
+  draw.primitive = PrimitiveType(ctx.r4.u32);
+  draw.indexed = false;
+  draw.up = false;
+  draw.start_index = ctx.r5.u32;
+  draw.index_count = ctx.r6.u32;
+  draw.min_index = draw.start_index;
+  draw.max_index = draw.start_index + draw.index_count - 1;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  BeginCapture(base);
+  CaptureVertices(rex::memory::GuestPtr(base, ctx.r3.u32), draw);
+  AddDraw(std::move(draw), start_ns);
+}
+
+// Post hook of D3D BeginVertices (8222CFF8): r3 = device, r4 = primitive
+// type, r5 = vertex count, r6 = stride; returns the vertex data's address, or
+// 0.
+void Gears1NativeBuffersAfterBeginVertices(const Gears1HookEntry& entry, PPCContext& ctx,
+                                           uint8_t* base) {
+  if (!REXCVAR_GET(gears1_native_renderer) || !ctx.r3.u32) {
+    return;
+  }
+  const uint64_t start_ns = SDL_GetTicksNS();
+  DrawRecord draw;
+  draw.primitive = PrimitiveType(entry.r4);
+  draw.indexed = false;
+  draw.up = true;
+  draw.start_index = 0;
+  draw.index_count = entry.r5;
+  draw.min_index = 0;
+  draw.max_index = entry.r5 - 1;
+  const BufferKey vertices = {PhysicalAddress(ctx.r3.u32), entry.r5 * entry.r6, kUpVertexBuffer};
+  std::lock_guard<std::mutex> lock(g_mutex);
+  BeginCapture(base);
+  CaptureVertices(rex::memory::GuestPtr(base, entry.r3), draw, &vertices);
+  g_pending_up.push_back({g_draws.size(), vertices.size, 0, Endian::kNone, UINT32_MAX});
+  AddDraw(std::move(draw), start_ns);
+}
+
+// Post hook of D3D BeginIndexedVertices (8222D4F8): r3 = device, r4 =
+// primitive type, r5 = base vertex index, r6 = vertex count, r7 = index count,
+// r8 = index format (bit 2: 32-bit), r9 = stride, r10 = where it stores the
+// index data's address, the ninth argument slot = where it stores the vertex
+// data's address; returns 0 on success.
+void Gears1NativeBuffersAfterBeginIndexedVertices(const Gears1HookEntry& entry, PPCContext& ctx,
+                                                  uint8_t* base) {
+  if (!REXCVAR_GET(gears1_native_renderer) || ctx.r3.u32) {
+    return;
+  }
+  using rex::memory::load_and_swap;
+  const uint64_t start_ns = SDL_GetTicksNS();
+  const uint8_t* device = rex::memory::GuestPtr(base, entry.r3);
+  DrawRecord draw;
+  draw.primitive = PrimitiveType(entry.r4);
+  draw.indexed = true;
+  draw.up = true;
+  draw.start_index = 0;
+  draw.index_count = entry.r7;
+  draw.index_offset = int32_t(entry.r5);
+  draw.index32 = entry.r8 & 4;
+  const uint32_t index_data = load_and_swap<uint32_t>(rex::memory::GuestPtr(base, entry.r10));
+  const uint32_t vertex_data = load_and_swap<uint32_t>(rex::memory::GuestPtr(
+      base, load_and_swap<uint32_t>(rex::memory::GuestPtr(base, entry.r1 + 0x54))));
+  draw.index_buffer = {PhysicalAddress(index_data), entry.r7 * (draw.index32 ? 4 : 2),
+                       kUpIndexBuffer};
+  const BufferKey vertices = {PhysicalAddress(vertex_data), entry.r6 * entry.r9, kUpVertexBuffer};
+  std::lock_guard<std::mutex> lock(g_mutex);
+  BeginCapture(base);
+  CaptureVertices(device, draw, &vertices);
+  g_pending_up.push_back({g_draws.size(), vertices.size, draw.index_buffer.size,
+                          draw.index32 ? Endian::k8in32 : Endian::k8in16,
+                          ResetIndex(device, draw)});
+  AddDraw(std::move(draw), start_ns);
 }
 
 void NativeBuffersEndFrame() {
   std::lock_guard<std::mutex> lock(g_mutex);
+  FinishUpDraws();
   g_last_draws.swap(g_draws);
   g_draws.clear();
   g_total_upload_bytes += g_stats.upload_bytes;
+  if (g_frame % 600 == 0) {
+    uint32_t up = 0, indexed = 0;
+    for (const DrawRecord& draw : g_last_draws) {
+      up += draw.up;
+      indexed += draw.indexed;
+    }
+    std::string problems;
+    for (const auto& [problem, count] : g_stats.problems) {
+      problems += ", " + problem + ": " + std::to_string(count);
+    }
+    REXLOG_INFO("Native buffers: frame {}: {} draws ({} indexed, {} UP){}", g_frame,
+                g_last_draws.size(), indexed, up, problems);
+  }
   g_last_stats = std::move(g_stats);
   g_stats = {};
   ++g_frame;
@@ -940,7 +1136,7 @@ void NativeBuffersRenderPreview(SDL_GPUDevice* device, SDL_GPUCommandBuffer* com
     vertex_buffers.push_back({it->second, 0});
   }
   auto index_buffer = g_buffers.find(draw.index_buffer);
-  if (index_buffer == g_buffers.end()) {
+  if (draw.indexed && index_buffer == g_buffers.end()) {
     g_preview_status = "index buffer released";
     return;
   }
@@ -980,18 +1176,22 @@ void NativeBuffersRenderPreview(SDL_GPUDevice* device, SDL_GPUCommandBuffer* com
   SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(command_buffer, &target, 1, nullptr);
   SDL_BindGPUGraphicsPipeline(pass, pipeline);
   SDL_BindGPUVertexBuffers(pass, 0, vertex_buffers.data(), uint32_t(vertex_buffers.size()));
-  const SDL_GPUBufferBinding index_binding = {index_buffer->second, 0};
-  SDL_BindGPUIndexBuffer(pass, &index_binding,
-                         draw.index32 ? SDL_GPU_INDEXELEMENTSIZE_32BIT
-                                      : SDL_GPU_INDEXELEMENTSIZE_16BIT);
-  SDL_DrawGPUIndexedPrimitives(pass, draw.index_count, 1, draw.start_index, 0, 0);
+  if (draw.indexed) {
+    const SDL_GPUBufferBinding index_binding = {index_buffer->second, 0};
+    SDL_BindGPUIndexBuffer(
+        pass, &index_binding,
+        draw.index32 ? SDL_GPU_INDEXELEMENTSIZE_32BIT : SDL_GPU_INDEXELEMENTSIZE_16BIT);
+    SDL_DrawGPUIndexedPrimitives(pass, draw.index_count, 1, draw.start_index, draw.index_offset, 0);
+  } else {
+    SDL_DrawGPUPrimitives(pass, draw.index_count, 1, draw.start_index, 0);
+  }
   SDL_EndGPURenderPass(pass);
 }
 
 void NativeBuffersDrawBrowser() {
   ImGui::SetNextWindowPos(ImVec2(840.0f, 120.0f), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(620.0f, 560.0f), ImGuiCond_FirstUseEver);
-  ImGui::Begin("Draws (indexed)");
+  ImGui::Begin("Draws");
   {
     std::lock_guard<std::mutex> lock(g_mutex);
     ImGui::Text("Last frame: %u draws, capture %.2f ms (hashing %.1f KB: %.2f ms), %u uploads "
@@ -1030,10 +1230,11 @@ void NativeBuffersDrawBrowser() {
         inputs += std::string(" ") + kLocationNames[element.location];
       }
       char label[256];
-      std::snprintf(label, sizeof(label), "%4d %-13s %6u idx  v %u-%u%s  vs %08X:%s %s", i,
-                    PrimitiveName(draw.primitive), draw.index_count, draw.min_index,
-                    draw.max_index, draw.reset ? " reset" : "", draw.vertex_shader,
-                    inputs.c_str(), draw.problem.c_str());
+      std::snprintf(label, sizeof(label), "%4d %-13s %6u %s%s  v %u-%u%s  vs %08X:%s %s", i,
+                    PrimitiveName(draw.primitive), draw.index_count, draw.indexed ? "idx" : "vtx",
+                    draw.up ? " UP" : "", draw.min_index, draw.max_index,
+                    draw.reset ? " reset" : "", draw.vertex_shader, inputs.c_str(),
+                    draw.problem.c_str());
       if (ImGui::Selectable(label, g_selected == i)) {
         g_selected = i;
         ComputeBounds(draw);
@@ -1050,13 +1251,19 @@ void NativeBuffersDrawBrowser() {
   bool open = true;
   ImGui::SetNextWindowSize(ImVec2(540.0f, 640.0f), ImGuiCond_FirstUseEver);
   ImGui::Begin("Draw preview", &open);
-  ImGui::Text("Draw %d: %s, %u indices from %u (%s), vertices %u-%u", g_selected,
-              PrimitiveName(draw.primitive), draw.index_count, draw.start_index,
-              draw.index32 ? "32-bit" : "16-bit", draw.min_index, draw.max_index);
+  if (draw.indexed) {
+    ImGui::Text("Draw %d: %s%s, %u indices from %u (%s, offset %d), vertices %u-%u", g_selected,
+                PrimitiveName(draw.primitive), draw.up ? " UP" : "", draw.index_count,
+                draw.start_index, draw.index32 ? "32-bit" : "16-bit", draw.index_offset,
+                draw.min_index, draw.max_index);
+  } else {
+    ImGui::Text("Draw %d: %s%s, %u vertices from %u", g_selected, PrimitiveName(draw.primitive),
+                draw.up ? " UP" : "", draw.index_count, draw.start_index);
+  }
   for (size_t i = 0; i < draw.bindings.size(); ++i) {
     ImGui::Text("Buffer %zu: %08X, %u bytes, stride %u%s", i, draw.bindings[i].buffer.address,
                 draw.bindings[i].buffer.size, draw.bindings[i].stride,
-                draw.bindings[i].buffer.variant ? " (float4 copy)" : "");
+                draw.bindings[i].buffer.variant >> 31 ? " (float4 copy)" : "");
   }
   if (g_have_bounds) {
     ImGui::Text("Bounds (%.1f %.1f %.1f) - (%.1f %.1f %.1f)", g_bounds_min[0], g_bounds_min[1],

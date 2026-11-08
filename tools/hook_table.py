@@ -80,16 +80,19 @@ PROBES = [
     (0x825D4B30, 'TranslucentAdditive', 'policy', {}),
     (0x825D4C80, 'TranslucentModulate', 'policy', {}),
 
-    # D3D draws (r3 = device). DrawIndexedVertices: native renderer vertex and
-    # index buffers (src/native_buffers.cpp)
+    # D3D draws (r3 = device): native renderer vertex and index buffers
+    # (src/native_buffers.cpp)
     (0x8222DE50, 'DrawIndexedVertices', 'draw', {'pre': ['Gears1NativeBuffersOnDrawIndexed']}),
-    (0x8222DA48, 'DrawVertices', 'draw', {}),
-    (0x8222CFF8, 'BeginVertices', 'draw', {}),
-    (0x8222D4F8, 'BeginIndexedVertices', 'draw', {}),
+    (0x8222DA48, 'DrawVertices', 'draw', {'pre': ['Gears1NativeBuffersOnDraw']}),
+    (0x8222CFF8, 'BeginVertices', 'draw', {'post': ['Gears1NativeBuffersAfterBeginVertices']}),
+    (0x8222D4F8, 'BeginIndexedVertices', 'draw',
+     {'post': ['Gears1NativeBuffersAfterBeginIndexedVertices']}),
 
     # D3D events
-    (0x82235528, 'Resolve', 'event', {}),
-    (0x8222CC48, 'Clear', 'event', {}),
+    # Resolve and Clear: native renderer render targets
+    # (src/native_targets.cpp)
+    (0x82235528, 'Resolve', 'event', {'pre': ['Gears1NativeTargetsOnResolve']}),
+    (0x8222CC48, 'Clear', 'event', {'pre': ['Gears1NativeTargetsOnClear']}),
     (0x8222B068, 'SetRenderTarget', 'event', {}),
     (0x8222B398, 'SetDepthStencilSurface', 'event', {}),
     (0x82229460, 'SetDepthBias', 'event', {'pre': ['Gears1ProbeDepthBiasPre']}),

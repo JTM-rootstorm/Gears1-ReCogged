@@ -1,8 +1,9 @@
-// Native renderer, phase 1 skeleton (NATIVE_RENDERER.md): an SDL_GPU device
-// and window next to the emulated renderer, which still consumes the game's
-// command buffers (D3D waits on it). Each guest frame (D3D Swap) clears the
-// window and draws an ImGui overlay; later phases render the game's own D3D
-// calls here and compare against the emulated window.
+// Native renderer (NATIVE_RENDERER.md): an SDL_GPU device and window next to
+// the emulated renderer, which still consumes the game's command buffers (D3D
+// waits on it). Each guest frame (D3D Swap) shows the front buffer the native
+// render targets resolved into (src/native_targets.cpp), or a slowly cycling
+// clear colour until there is one, under an ImGui overlay; later phases render
+// the game's own draws here and compare against the emulated window.
 //
 // Window and swapchain calls must run on the main thread, so the hooks only
 // record state and post work there (SDL_RunOnMainThread). ImGui is the
@@ -31,6 +32,9 @@
 
 REXCVAR_DEFINE_BOOL(gears1_native_renderer, false, "Gears1",
                     "Open the native renderer's window (SDL_GPU) next to the emulated one")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(gears1_native_gpu_debug, false, "Gears1",
+                    "Create the native renderer's SDL_GPU device in debug mode (validation)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace {
@@ -126,8 +130,8 @@ void Create(void*) {
   const int width = int(g_back_buffer_width.load()), height = int(g_back_buffer_height.load());
   g_window = SDL_CreateWindow("Gears of War - native renderer", width ? width : 1280,
                               height ? height : 720, SDL_WINDOW_RESIZABLE);
-  g_device = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_MSL, false,
-                                 nullptr);
+  g_device = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_MSL,
+                                 REXCVAR_GET(gears1_native_gpu_debug), nullptr);
   if (!g_window || !g_device || !SDL_ClaimWindowForGPUDevice(g_device, g_window)) {
     REXLOG_ERROR("Native renderer: no SDL_GPU window: {}", SDL_GetError());
     return;
@@ -167,6 +171,7 @@ void Present(void*) {
 
   NativeTexturesUpload(g_device, command_buffer);
   NativeBuffersUpload(g_device, command_buffer);
+  NativeTargetsExecute(g_device, command_buffer);
 
   const uint64_t now = SDL_GetTicksNS();
   if (g_last_present_ns) {
@@ -186,7 +191,7 @@ void Present(void*) {
   ImGui::Begin("Native renderer", nullptr,
                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
                    ImGuiWindowFlags_NoSavedSettings);
-  ImGui::Text("Phase 2: resources (textures, vertex and index buffers)");
+  ImGui::Text("Phase 2: resources (textures, buffers, render targets)");
   ImGui::Text("Guest D3D device %08X, back buffer %ux%u", g_guest_device.load(),
               g_back_buffer_width.load(), g_back_buffer_height.load());
   ImGui::Text("Guest frames %llu, presented %llu", (unsigned long long)g_guest_frames.load(),
@@ -195,23 +200,36 @@ void Present(void*) {
   ImGui::End();
   NativeTexturesDrawBrowser();
   NativeBuffersDrawBrowser();
+  NativeTargetsDrawBrowser();
   ImGui::Render();
   ImDrawData* draw_data = ImGui::GetDrawData();
   ImGui_ImplSDLGPU3_PrepareDrawData(draw_data, command_buffer);
   NativeBuffersRenderPreview(g_device, command_buffer);
 
-  // Slowly cycling hue, so a stalled window is obvious.
+  const bool presented =
+      NativeTargetsPresent(g_device, command_buffer, swapchain,
+                           SDL_GetGPUSwapchainTextureFormat(g_device, g_window), width, height);
+  // Until then a slowly cycling hue, so a stalled window is obvious.
   const float hue = float(g_guest_frames.load() % 600) / 600.0f * 6.2831853f;
   SDL_GPUColorTargetInfo target = {};
   target.texture = swapchain;
-  target.load_op = SDL_GPU_LOADOP_CLEAR;
+  target.load_op = presented ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR;
   target.store_op = SDL_GPU_STOREOP_STORE;
   target.clear_color = {0.25f + 0.15f * std::sin(hue), 0.25f + 0.15f * std::sin(hue + 2.094f),
                         0.25f + 0.15f * std::sin(hue + 4.189f), 1.0f};
   SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(command_buffer, &target, 1, nullptr);
   ImGui_ImplSDLGPU3_RenderDrawData(draw_data, command_buffer, pass);
   SDL_EndGPURenderPass(pass);
-  SDL_SubmitGPUCommandBuffer(command_buffer);
+  if (!NativeTargetsQueueDump(g_device, command_buffer)) {
+    SDL_SubmitGPUCommandBuffer(command_buffer);
+    return;
+  }
+  SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(command_buffer);
+  if (fence) {
+    SDL_WaitForGPUFences(g_device, true, &fence, 1);
+    SDL_ReleaseGPUFence(g_device, fence);
+  }
+  NativeTargetsFinishDump(g_device);
 }
 
 }  // namespace
@@ -234,13 +252,15 @@ void Gears1NativeRendererDeviceInit(const Gears1HookEntry& entry, PPCContext&, u
   SDL_RunOnMainThread(Create, nullptr, false);
 }
 
-// Post hook of D3D Swap: one per guest frame.
-void Gears1NativeRendererFrame(const Gears1HookEntry&, PPCContext&, uint8_t*) {
+// Post hook of D3D Swap: one per guest frame. r3 = device, r4 = the front
+// buffer texture.
+void Gears1NativeRendererFrame(const Gears1HookEntry& entry, PPCContext&, uint8_t* base) {
   if (!REXCVAR_GET(gears1_native_renderer)) {
     return;
   }
   ++g_guest_frames;
   NativeBuffersEndFrame();
+  NativeTargetsEndFrame(entry.r4, base);
   if (!g_present_pending.exchange(true)) {
     SDL_RunOnMainThread(Present, nullptr, false);
   }

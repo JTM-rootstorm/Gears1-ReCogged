@@ -19,9 +19,9 @@ enum class Gears1ProbeKind : uint8_t {
   kFrame,
 };
 
-// Argument registers at entry, for post hooks.
+// Stack pointer and argument registers at entry, for post hooks.
 struct Gears1HookEntry {
-  uint32_t r3, r4, r5;
+  uint32_t r1, r3, r4, r5, r6, r7, r8, r9, r10;
 };
 
 struct Gears1ProbeInfo {

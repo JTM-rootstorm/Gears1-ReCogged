@@ -1498,3 +1498,46 @@ LD_LIBRARY_PATH=~/Documents/Programming/ReXGlue/linux-amd64/lib \
   KeDelayExecutionThread (278k, one caller, 82613800). The table joining
   these with the real 17559 xam is ~/Documents/Programming/Recomp/X360/
   COVERAGE.md (outside git; tools/build.sh rebuilds it).
+- NATIVE RENDER TARGETS (2026-11-07, src/native_targets.cpp;
+  D3D Clear, Resolve and Swap signatures and the surface object layout in
+  NATIVE_RENDERER.md "D3D API map"). Pre hooks on Clear and Resolve record
+  each guest frame's operations from the bound surfaces; the main thread
+  replays every recorded frame in order and presents the front buffer that
+  Swap names (r4). Each guest surface is a host texture keyed by EDRAM base,
+  format and size (1x: no MSAA, see "MSAA resolve" in NATIVE_RENDERER.md);
+  each Resolve destination a host texture keyed by the destination fetch
+  constant's address, format and size, and SetTexture skips decoding those.
+  Clears draw a rectangle (rect.vert + clear.frag / clear_depth.frag, stencil
+  as the pipeline reference); Resolve copies with copy.frag (nearest texel,
+  red/blue swap, exponent bias scale). One title-screen frame: depth/stencil
+  cleared to Z 0 (reversed Z), stencil 128; 7e3 scene colour cleared and
+  resolved into a 16_16_16_16_FLOAT texture with bias -3 (x0.125); depth
+  resolved into a 24_8_FLOAT texture; three resolves of a 322x182
+  16_16_16_16_FLOAT target into a 16_16_16_16_EXPAND texture (bloom); the
+  8888 back buffer resolved (red/blue swapped) into two textures, one of them
+  the front buffer. 17 operations, 6 surfaces, 6 resolve destinations per
+  frame; the front buffer arrives at the window (black while nothing draws
+  natively; gears1_native_dump_dir writes it as BMPs). Not covered yet: the
+  render target's own exponent bias and gamma (RB_COLOR_INFO; phase 3, with
+  the shaders that write them), resolves into a slice (counted), EDRAM
+  aliasing between surfaces of different formats (each is its own texture),
+  sample select. Seen only on the title screen so far.
+- NATIVE DRAWS, all kinds (2026-11-07, src/native_buffers.cpp): DrawVertices
+  (pre hook) uses the bound streams like DrawIndexedVertices; the UP draws
+  (BeginVertices / BeginIndexedVertices, post hooks) get vertex fetch
+  constant 95 pointed at command buffer memory the caller fills after the
+  call returns, so their data is read at the next draw or the frame's end,
+  hashed and uploaded as its own buffer. Post hooks now get r1 and r3-r10
+  (Gears1HookEntry). Title screen: ~115 draws a frame, 99 indexed, ~95 UP,
+  none with a capture problem. Textures: stacked (2D array) and cube
+  textures are decoded slice by slice; 3D textures still are not. The texture
+  upload had a validation error (copies from the transfer buffer at offsets
+  not a multiple of the block size); offsets are now 16-byte aligned.
+- RUNS (2026-11-07): SDL_AUDIO_DRIVER=dummy breaks the game: the runtime's
+  SDL has no dummy driver, audio init fails and guest thread F8000078 then
+  faults in a loop (read of 0x3C), about 100 MB of log a minute. Use
+  --audio_mute=true. Killing a run with SIGTERM floods the same way while
+  shutting down; the log file sink rotates 20 x 5 MB and loses the boot, so
+  log to /dev/stdout through a filter. --fullscreen=false keeps the window
+  off the monitor under the mouse (Hyprland).
+

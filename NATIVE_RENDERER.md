@@ -6,9 +6,12 @@ SDL_GPU (Vulkan on Linux, Metal possible later; NATIVE_PORT.md "Platform:
 SDL3"), in the spirit of Unleashed Recompiled. Keep the emulated path as a
 switchable fallback and as the reference to compare against.
 
-Status: phase 2 resources: textures (src/native_textures.cpp), vertex and
-index buffers (src/native_buffers.cpp). Findings and progress go
-in FINDINGS.md.
+Status: phase 2 (resources): textures (src/native_textures.cpp),
+vertex and index buffers of every draw kind (src/native_buffers.cpp),
+render targets with Clear and Resolve, and the front buffer presented
+(src/native_targets.cpp). Not yet: 3D textures (none on the title
+screen). Next: phase 3. Findings and progress go in
+FINDINGS.md.
 
 Decided (2026-10-10): hook at the Xbox D3D API level; prototype BOTH shader
 translators on the skinning VS before choosing.
@@ -124,7 +127,7 @@ project (D3DDevice_*, D3DQuery_*, D3DResource_*, D3D_* for internals;
 | Address | Function |
 |---|---|
 | 8222DE50 | DrawIndexedVertices(dev, prim, baseIdx, startIdx, idxCount) |
-| 8222D4F8 | BeginIndexedVertices (UP-style draw, allocates VB/IB in the cmd buffer) |
+| 8222D4F8 | BeginIndexedVertices(dev, prim, BaseVertexIndex, NumVertices, IndexCount, index format (bit 2: 32-bit), stride, &index data, &vertex data in the 9th slot (r1+0x54)); returns 0 on success; vertices are vertex fetch constant 95, 8in32, indices 8in16/8in32 offset by BaseVertexIndex (VGT_INDX_OFFSET) |
 | 8222AFD8 | SetIndices(dev, ib) → +0x2F84 |
 | 8222AE20 | SetStreamSource(dev, stream, vb, offset, stride, dirty) → +0x2F9C+n*4 |
 | 82222B98 / 82222808 | SetVertexShader → +0x3084 / SetPixelShader → +0x3080 |
@@ -142,13 +145,14 @@ project (D3DDevice_*, D3DQuery_*, D3DResource_*, D3D_* for internals;
 | 8222E868 / 8222E8E0 / 8222E988 | D3DResource AddRef / Release / GetType |
 | 8221E7B8, 8221E960, 8221EDF8, 8221E850 | texture format/size helpers (XGraphics) |
 | 82228458, 82228618, 8222FEF0, 8222B678 | internal: tiling reset, tiled scissor, query sample write, GPR-change dummy draws |
-| 8222CFF8 | BeginVertices(dev, prim, count, stride) → write pointer into the cmd buffer (DRAW_INDX 0xC0012201); caller copies vertices, then EndVertices is inlined (+0x28 = +0x3314) |
+| 8222CFF8 | BeginVertices(dev, prim, count, stride) → write pointer into the cmd buffer (DRAW_INDX 0xC0012201), vertex fetch constant 95, 8in32; caller copies vertices, then EndVertices is inlined (+0x28 = +0x3314) |
 | 8222D4B0 | DrawVerticesUP (BeginVertices + memcpy + inlined EndVertices) |
 | 8222DA48 | DrawVertices(dev, prim, start, count) (non-indexed, no return; 2 UE3 callers, not seen in trace) |
 | 822346A8 | internal pre-draw state commit; called by all four draws (reads decl +0x2D10, shaders, dirty masks) |
 | 8222B398 | SetDepthStencilSurface(dev, surface) → +0x2F98 (only writer) |
-| 8222CC48 | Clear(dev, flags&0xF, rects/NULL, color, f1=Z, stencil); per-tile loop when tiling is on (worker 8222C5C0) |
-| 82235528 | Resolve (only code that loads RB_COPY_CONTROL 0x2318); called by UE3 and by Swap's 8223EF60 |
+| 8222CC48 | Clear(dev, flags (0xF RT0-3, 0x10 Z, 0x20 stencil), one rect or NULL (RT0's or the depth surface's size), float4 color*, stencil; f1=Z); clipped to the viewport (+0x3058) and, when +0x2D40 is set, the scissor (+0x3070); per-tile loop when tiling is on (worker 8222C5C0) |
+| 82235528 | Resolve(dev, flags, src rect or NULL (dest size), dest texture, dest point or NULL, level, slice, float4 clear color*, stencil in the 10th slot (r1+0x5C); f1=clear Z) (only code that loads RB_COPY_CONTROL 0x2318). Flags = RB_COPY_CONTROL bits: 0-2 source (4 = depth), 4-6 sample select, 0x100 clear colour, 0x200 clear depth/stencil, 0x2000 copy command null (clear only), bits 26-31 exponent bias; right/bottom rounded up to 8; copy_dest_swap when the destination swizzle's X is not channel 0. Writes the copy registers to the shadow (+0x2998 RB_COPY_CONTROL .. +0x29A4 RB_COPY_DEST_INFO, +0x29B0/B4 clear colour) and resets them after. Called by UE3 and by Swap's 8223EF60 (RT0 into the front buffer) |
+| 8223E860 | Swap(dev, front buffer texture, parameters) |
 | 822364F8 / 822369F0 | BeginTiling / EndTiling (call Clear, viewport, 82228458); dead with the tiling patch |
 | 82222E18 | CreateVertexDeclaration(elements) (12-byte elements, Stream 0xFF ends; object type 5) |
 | 82222DF8 | SetVertexDeclaration → +0x2D10 (UE3 also inlines this store: 8254E728, 8254E948, 82591A48, …; the RHI stores 0, so UE3 draws with pre-patched vertex shaders and no declaration, FINDINGS "NATIVE VERTEX/INDEX BUFFERS") |
@@ -179,6 +183,12 @@ and 0x2DEC..0x2DF8.
 Not D3D (UE3, ignore): 82213EA0, 82214098, 821FBEE8, 821FC470, 8221CBA8
 (UE3 dynamic ring-buffer allocator - waits on a GPU read pointer), 822598E0,
 82214820, 8225DDA0, 8225C0E0.
+
+Surface object (D3DSurface, render target or depth/stencil): +0x18
+RB_SURFACE_INFO (pitch, MSAA), +0x1C RB_COLOR_INFO / RB_DEPTH_INFO (EDRAM
+base, format, exponent bias; SetRenderTarget / SetDepthStencilSurface copy it
+into the register shadow), +0x20 RB_HIZCONTROL (depth), +0x24 size: width - 1
+in bits 18-31, height - 1 in bits 3-17 (what Clear's default rectangle reads).
 
 Device layout: dirty masks +0x00 (VS consts, shadow +0x700), +0x08 (PS
 consts, shadow +0x1700), +0x10 (regs 0x2200.., fetch consts shadow +0x400,

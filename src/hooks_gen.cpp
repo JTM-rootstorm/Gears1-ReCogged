@@ -189,12 +189,17 @@ void DumpFrame() {
 }
 }  // namespace
 
+void Gears1NativeBuffersOnDraw(PPCContext& ctx, uint8_t* base);
 void Gears1NativeBuffersOnDrawIndexed(PPCContext& ctx, uint8_t* base);
+void Gears1NativeTargetsOnClear(PPCContext& ctx, uint8_t* base);
+void Gears1NativeTargetsOnResolve(PPCContext& ctx, uint8_t* base);
 void Gears1NativeTexturesOnSetTexture(PPCContext& ctx, uint8_t* base);
 void Gears1OnSetPixelShader(PPCContext& ctx, uint8_t* base);
 void Gears1OnSetVertexShader(PPCContext& ctx, uint8_t* base);
 void Gears1ProbeDepthBiasPre(PPCContext& ctx, uint8_t* base);
 void Gears1MouseLookAfterTick(const Gears1HookEntry& entry, PPCContext& ctx, uint8_t* base);
+void Gears1NativeBuffersAfterBeginIndexedVertices(const Gears1HookEntry& entry, PPCContext& ctx, uint8_t* base);
+void Gears1NativeBuffersAfterBeginVertices(const Gears1HookEntry& entry, PPCContext& ctx, uint8_t* base);
 void Gears1NativeRendererDeviceInit(const Gears1HookEntry& entry, PPCContext& ctx, uint8_t* base);
 void Gears1NativeRendererFrame(const Gears1HookEntry& entry, PPCContext& ctx, uint8_t* base);
 
@@ -446,6 +451,7 @@ REX_EXTERN(__imp__sub_8222CC48);
 extern "C" REX_FUNC(sub_8222CC48) {
   Count(193);
   // Clear
+  Gears1NativeTargetsOnClear(ctx, base);
   Gears1ProbeEvent(53, ctx);
   __imp__sub_8222CC48(ctx, base);
 }
@@ -453,21 +459,26 @@ REX_EXTERN(__imp__sub_8222CFF8);
 extern "C" REX_FUNC(sub_8222CFF8) {
   Count(194);
   // BeginVertices
+  const Gears1HookEntry entry{ctx.r1.u32, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, ctx.r10.u32};
   Gears1ProbeDraw(50, ctx, base);
   __imp__sub_8222CFF8(ctx, base);
+  Gears1NativeBuffersAfterBeginVertices(entry, ctx, base);
 }
 OBSERVE(195, sub_8222D4B0)
 REX_EXTERN(__imp__sub_8222D4F8);
 extern "C" REX_FUNC(sub_8222D4F8) {
   Count(196);
   // BeginIndexedVertices
+  const Gears1HookEntry entry{ctx.r1.u32, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, ctx.r10.u32};
   Gears1ProbeDraw(51, ctx, base);
   __imp__sub_8222D4F8(ctx, base);
+  Gears1NativeBuffersAfterBeginIndexedVertices(entry, ctx, base);
 }
 REX_EXTERN(__imp__sub_8222DA48);
 extern "C" REX_FUNC(sub_8222DA48) {
   Count(197);
   // DrawVertices
+  Gears1NativeBuffersOnDraw(ctx, base);
   Gears1ProbeDraw(49, ctx, base);
   __imp__sub_8222DA48(ctx, base);
 }
@@ -510,6 +521,7 @@ REX_EXTERN(__imp__sub_82235528);
 extern "C" REX_FUNC(sub_82235528) {
   Count(226);
   // Resolve
+  Gears1NativeTargetsOnResolve(ctx, base);
   Gears1ProbeEvent(52, ctx);
   __imp__sub_82235528(ctx, base);
 }
@@ -520,7 +532,7 @@ REX_EXTERN(__imp__sub_8223A840);
 extern "C" REX_FUNC(sub_8223A840) {
   Count(230);
   // DeviceInit
-  const Gears1HookEntry entry{ctx.r3.u32, ctx.r4.u32, ctx.r5.u32};
+  const Gears1HookEntry entry{ctx.r1.u32, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, ctx.r10.u32};
   __imp__sub_8223A840(ctx, base);
   Gears1NativeRendererDeviceInit(entry, ctx, base);
 }
@@ -529,7 +541,7 @@ REX_EXTERN(__imp__sub_8223E860);
 extern "C" REX_FUNC(sub_8223E860) {
   Count(232);
   // Swap
-  const Gears1HookEntry entry{ctx.r3.u32, ctx.r4.u32, ctx.r5.u32};
+  const Gears1HookEntry entry{ctx.r1.u32, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, ctx.r10.u32};
   const bool observe = REXCVAR_GET(gears1_d3d_observe);
   __imp__sub_8223E860(ctx, base);
   Gears1NativeRendererFrame(entry, ctx, base);
@@ -780,7 +792,7 @@ OBSERVE(473, sub_82279468)
 REX_EXTERN(__imp__sub_823CB580);
 extern "C" REX_FUNC(sub_823CB580) {
   // PlayerControllerTick
-  const Gears1HookEntry entry{ctx.r3.u32, ctx.r4.u32, ctx.r5.u32};
+  const Gears1HookEntry entry{ctx.r1.u32, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, ctx.r10.u32};
   __imp__sub_823CB580(ctx, base);
   Gears1MouseLookAfterTick(entry, ctx, base);
 }
